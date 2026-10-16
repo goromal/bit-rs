@@ -1,0 +1,20 @@
+name: Rust checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: bit-rs
+      - uses: actions/checkout@v5
+        with:
+          repository: goromal/aapis
+          ref: 39a0204651603b6090dd02aa974dcf091aecc7fc
+          path: aapis
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo fmt --check && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
+        working-directory: bit-rs

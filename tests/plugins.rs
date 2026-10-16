@@ -62,7 +62,7 @@ async fn endpoint(
             assert_eq!(data["image"], "input-fixture.png");
             json!({"id":id})
         }
-        "api/queue/start" | "api/queue/remove" => json!({"ok":true}),
+        "api/queue/start" | "api/queue/cancel" => json!({"ok":true}),
         "api/queue/image" => {
             if mock.mode == "invalid" {
                 return "not an image".into_response();
@@ -155,7 +155,12 @@ async fn cozy_tracks_result_validates_image_and_cleans_up_only_its_job() {
             assert_eq!(requests.as_slice(), ["api/queue/status"]);
         }
         if ["failed", "invalid", "timeout"].contains(&mode) {
-            assert!(requests.contains(&"api/queue/remove".to_string()));
+            assert!(requests.contains(&"api/queue/cancel".to_string()));
+        }
+        if mode == "timeout" {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("no output within 1 seconds"), "{stderr}");
+            assert!(!requests.iter().any(|r| r == "api/queue/image"));
         }
         assert!(!requests
             .iter()

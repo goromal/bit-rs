@@ -65,8 +65,10 @@ Initial plugins:
   900. Requires an idle Cozy queue, uploads a generated 256×256 red-square PNG,
   requests a blue square using `imgedit2`, tracks its job ID, and downloads and
   decodes a valid result. It tests workflow execution, not semantic image
-  quality. Pending jobs are removed on error when possible; active remote jobs
-  may finish later. Uploaded inputs and completed outputs remain in Cozy for
+  quality. If no valid output arrives within `max_seconds` (or the job fails),
+  the check fails immediately and cancels its own job through Cozy's
+  `/api/queue/cancel`, which removes it if pending or interrupts it in ComfyUI
+  if running. Uploaded inputs and completed outputs remain in Cozy for
   inspection. It never clears the shared queue or restarts ComfyUI.
 
 ## NixOS

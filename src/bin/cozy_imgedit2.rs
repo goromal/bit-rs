@@ -127,17 +127,23 @@ impl Cozy {
         match result {
             Ok(Ok(())) => Ok(()),
             other => {
-                // Remove only our pending job. Cozy cannot cancel an active job;
-                // leave other work and completed results intact.
-                let _ = client
-                    .post(format!("{api}/queue/remove"))
+                // Cancel only our job, whether still pending or already running
+                // on the GPU; leave other work and completed results intact.
+                match client
+                    .post(format!("{api}/queue/cancel"))
                     .json(&json!({"id":id}))
                     .send()
-                    .await;
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => println!("cancelled Cozy job {id}"),
+                    Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {}
+                    Ok(r) => println!("cancel of Cozy job {id} failed: HTTP {}", r.status()),
+                    Err(e) => println!("cancel of Cozy job {id} failed: {e}"),
+                }
                 match other {
                     Ok(Err(e)) => Err(e),
                     _ => bail!(
-                        "job {id} exceeded {} seconds; an active Cozy job may finish later",
+                        "job {id} produced no output within {} seconds; cancelled",
                         self.max_seconds
                     ),
                 }

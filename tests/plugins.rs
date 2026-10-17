@@ -347,3 +347,63 @@ async fn nvidia_power_flags_capped_gpus() {
         assert!(!output.status.success());
     }
 }
+async fn remediation(binary: &str, config: Value) -> String {
+    let mut child = tokio::process::Command::new(binary)
+        .arg("--remediation")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(config.to_string().as_bytes())
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success(), "{binary}");
+    String::from_utf8(output.stdout).unwrap()
+}
+#[tokio::test]
+async fn every_plugin_gives_config_aware_remediation_without_checking() {
+    let (url, mock, server) = server("success").await;
+    let cases = [
+        (
+            env!("CARGO_BIN_EXE_bit-check-internet"),
+            json!({"urls":["https://example.invalid/204"]}),
+            "https://example.invalid/204",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-avahi"),
+            json!({"hostname":"box.local"}),
+            "avahi-resolve-host-name -4 box.local",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-nvidia-power"),
+            json!({"nvidia_smi":"/opt/nvidia-smi"}),
+            "/opt/nvidia-smi -q -d POWER",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-cozy-imgedit2"),
+            json!({"url":url,"token_file":"/secret/token","png_command":"/bin/png"}),
+            "/secret/token",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
+            json!({"url":url,"token_file":"/secret/token","workflow":"wf9"}),
+            "The wf9 job",
+        ),
+    ];
+    for (binary, config, expected) in cases {
+        let text = remediation(binary, config).await;
+        assert!(text.contains(expected), "{binary}: {text}");
+        assert!(!text.contains("check started"), "{binary}: {text}");
+    }
+    assert!(mock.requests.lock().unwrap().is_empty());
+    server.abort();
+}

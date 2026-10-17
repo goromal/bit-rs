@@ -18,6 +18,16 @@ fn urls() -> Vec<String> {
 }
 #[async_trait]
 impl BitCheck for Internet {
+    fn remediation(&self) -> String {
+        format!(
+            "No endpoint ({}) returned HTTP 204.\n\
+             - Check the link: `ip addr`, `nmcli device status`, Wi-Fi/Ethernet cable.\n\
+             - Check DNS: `resolvectl query www.gstatic.com`.\n\
+             - A captive portal (hotel/guest Wi-Fi) needs a browser login first.\n\
+             - `journalctl -u bitd` shows the error for each endpoint.",
+            self.urls.join(", ")
+        )
+    }
     async fn check(&self) -> Result<()> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))

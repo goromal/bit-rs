@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{io, time::Duration};
 use tonic::transport::{Channel, Endpoint};
@@ -39,7 +39,7 @@ fn state(c: &Check) -> State {
     State::try_from(c.state).unwrap_or(State::Unspecified)
 }
 fn json(c: &Check) -> serde_json::Value {
-    serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms})
+    serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms,"remediation":c.remediation})
 }
 /// Age as its two largest units, e.g. "5s", "1m 30s", "6d 5h".
 fn ago(ms: u64) -> String {
@@ -61,6 +61,34 @@ fn last_run(c: &Check, now_ms: i64) -> String {
         at if at <= 0 => "never".into(),
         at => format!("{} ago", ago(now_ms.saturating_sub(at).max(0) as u64)),
     }
+}
+fn remediation_text(c: &Check) -> &str {
+    match c.remediation.as_str() {
+        "" => "No suggestions from this plugin; see journalctl -u bitd.",
+        text => text,
+    }
+}
+/// Rows `text` occupies when greedily word-wrapped to `width`.
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let mut rows = 0usize;
+    for line in text.lines() {
+        let (mut used, mut line_rows) = (0usize, 1usize);
+        for word in line.split(' ').map(|w| w.chars().count()) {
+            if used > 0 && used + 1 + word <= width {
+                used += 1 + word;
+            } else {
+                if used > 0 {
+                    line_rows += 1;
+                }
+                // A word longer than the width is broken across rows.
+                line_rows += word.saturating_sub(1) / width;
+                used = (word.saturating_sub(1) % width) + 1;
+            }
+        }
+        rows += line_rows;
+    }
+    rows.min(usize::from(u16::MAX)) as u16
 }
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -156,11 +184,15 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
             .unwrap_or(0)
             .min(checks.len().saturating_sub(1));
         selection.select(Some(index));
+        let selected = checks.get(index);
         terminal.draw(|f| {
+            let hint_rows =
+                selected.map_or(0, |c| 1 + wrapped_rows(remediation_text(c), f.area().width));
             let areas = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Min(3),
-                Constraint::Length(4),
+                Constraint::Length(3),
+                Constraint::Max(hint_rows),
                 Constraint::Length(2),
             ])
             .split(f.area());
@@ -202,8 +234,7 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
             .row_highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol("› ");
             f.render_stateful_widget(table, areas[1], &mut selection);
-            let detail = checks
-                .get(index)
+            let detail = selected
                 .map(|c| c.detail.as_str())
                 .unwrap_or("No checks configured");
             f.render_widget(
@@ -211,10 +242,23 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                     .block(Block::default().borders(Borders::TOP)),
                 areas[2],
             );
+            if let Some(c) = selected {
+                f.render_widget(
+                    Paragraph::new(remediation_text(c))
+                        .wrap(Wrap { trim: false })
+                        .block(
+                            Block::default()
+                                .borders(Borders::TOP)
+                                .title(format!(" If {} fails ", c.name))
+                                .title_style(Style::default().fg(Color::Yellow).bold()),
+                        ),
+                    areas[3],
+                );
+            }
             f.render_widget(
                 Paragraph::new("↑/↓ select   Enter run selected   r run regressions   q quit")
                     .fg(Color::Cyan),
-                areas[3],
+                areas[4],
             );
         })?;
         if event::poll(Duration::from_millis(100))? {
@@ -265,6 +309,15 @@ mod tests {
             finished_unix_ms: finished,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn remediation_falls_back_and_sizes_by_wrapping() {
+        assert!(remediation_text(&Check::default()).starts_with("No suggestions"));
+        assert_eq!(wrapped_rows("abc\n\nabcdefghij", 5), 4);
+        // "ab" / "cdef" / "gh": character counting would say 2 rows.
+        assert_eq!(wrapped_rows("ab cdef gh", 5), 3);
+        assert_eq!(wrapped_rows("", 0), 0);
     }
 
     #[test]

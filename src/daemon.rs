@@ -79,6 +79,31 @@ impl Service {
             }
         }
     }
+    /// Asks every plugin for its remediation text, concurrently. A plugin that
+    /// cannot answer just leaves the field empty; checks run regardless.
+    pub async fn load_remediation(&self) {
+        let configs: Vec<CheckConfig> = self
+            .entries
+            .lock()
+            .await
+            .values()
+            .map(|e| e.config.clone())
+            .collect();
+        let mut queries = tokio::task::JoinSet::new();
+        for config in configs {
+            queries.spawn(async move { (config.name.clone(), remediation(&config).await) });
+        }
+        while let Some(Ok((name, result))) = queries.join_next().await {
+            match result {
+                Ok(text) => {
+                    if let Some(entry) = self.entries.lock().await.get_mut(&name) {
+                        entry.status.remediation = text;
+                    }
+                }
+                Err(e) => println!("check={name} no remediation: {e:#}"),
+            }
+        }
+    }
     pub async fn snapshot(&self) -> Vec<Check> {
         self.entries
             .lock()
@@ -159,6 +184,41 @@ impl Drop for ProcessGroup {
             libc::kill(-(self.0 as i32), libc::SIGKILL);
         }
     }
+}
+const REMEDIATION_TIMEOUT: Duration = Duration::from_secs(5);
+const REMEDIATION_MAX_BYTES: usize = 4096;
+async fn remediation(c: &CheckConfig) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let mut child = Command::new(&c.command)
+        .arg(crate::plugin::REMEDIATION_FLAG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .context("cannot spawn")?;
+    let _group = ProcessGroup(child.id().unwrap());
+    let mut stdin = child.stdin.take().unwrap();
+    let input = serde_json::to_vec(&c.config).unwrap();
+    let output = tokio::time::timeout(REMEDIATION_TIMEOUT, async {
+        stdin.write_all(&input).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    })
+    .await
+    .context("timed out")??;
+    anyhow::ensure!(output.status.success(), "{}", output.status);
+    let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.len() > REMEDIATION_MAX_BYTES {
+        let cut = (0..=REMEDIATION_MAX_BYTES)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0);
+        text.truncate(cut);
+        text.push('…');
+    }
+    Ok(text)
 }
 async fn execute(c: &CheckConfig, mut stop: watch::Receiver<bool>) -> (State, String) {
     if *stop.borrow() {

@@ -149,6 +149,14 @@ impl Cozy {
 }
 #[async_trait]
 impl BitCheck for Cozy {
+    fn remediation(&self) -> String {
+        format!(
+            "{}\n\
+             - Wrong-output failures: the log names the seed; rerun with `seed` set to \
+             reproduce, and inspect the result image in Cozy.",
+            bit_rs::cozy::remediation(&self.url, &self.token_file, "imgedit2", self.max_seconds)
+        )
+    }
     async fn check(&self) -> Result<()> {
         ensure!(self.max_seconds > 0, "max_seconds must be positive");
         ensure!(

@@ -53,6 +53,18 @@ fn parse(csv: &str) -> Result<Vec<Gpu>> {
 
 #[async_trait]
 impl BitCheck for NvidiaPower {
+    fn remediation(&self) -> String {
+        format!(
+            "A capped GPU runs near idle clocks, so GPU jobs (e.g. ComfyUI) take many \
+             times longer.\n\
+             - Reboot: firmware can leave the limit capped after a resume, notably \
+             hybrid-sleep, and only a reboot resets it.\n\
+             - Confirm AC power is connected; on battery the platform caps the GPU.\n\
+             - Inspect: `{smi} -q -d POWER,PERFORMANCE` (Current vs Default Power \
+             Limit, Clocks Event Reasons).",
+            smi = self.nvidia_smi
+        )
+    }
     async fn check(&self) -> Result<()> {
         ensure!(
             self.min_fraction > 0.0 && self.min_fraction <= 1.0,

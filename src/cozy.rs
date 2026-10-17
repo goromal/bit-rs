@@ -13,6 +13,19 @@ use std::{io::Cursor, path::Path, time::Duration};
 const POLL: Duration = Duration::from_secs(2);
 const MAX_RESULT_BYTES: usize = 50 * 1024 * 1024;
 
+/// Shared remediation text for the cozy_* regression plugins.
+pub fn remediation(url: &str, token_file: &Path, workflow: &str, max_seconds: u64) -> String {
+    format!(
+        "The {workflow} job through Cozy ({url}) failed or exceeded {max_seconds} s.\n\
+         - Services: `systemctl status cozy comfyui`; errors: `journalctl -u comfyui -n 200`.\n\
+         - Slow runs: check the nvidia_power health check (a capped GPU makes jobs \
+         ~10x slower) and compare s/it in the ComfyUI log with past runs.\n\
+         - \"Cozy queue is busy\": wait for other Cozy jobs to finish, then rerun.\n\
+         - 401/403: the token in {} must match Cozy's api_token_hash.",
+        token_file.display()
+    )
+}
+
 pub struct CozyClient {
     api: String,
     client: Client,

@@ -40,6 +40,14 @@ fn scale_factor(got: (u32, u32), want: (u32, u32)) -> Option<u32> {
 
 #[async_trait]
 impl BitCheck for Cozy {
+    fn remediation(&self) -> String {
+        bit_rs::cozy::remediation(
+            &self.url,
+            &self.token_file,
+            &self.workflow,
+            self.max_seconds,
+        )
+    }
     async fn check(&self) -> Result<()> {
         ensure!(self.max_seconds > 0, "max_seconds must be positive");
         ensure!(

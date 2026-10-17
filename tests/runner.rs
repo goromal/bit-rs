@@ -147,3 +147,43 @@ fn reject_invalid_configuration() {
     config.checks.push(config.checks[0].clone());
     assert!(config.validate().is_err());
 }
+#[tokio::test]
+async fn remediation_is_queried_without_running_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let ran = ran.display();
+    let mut answers = check(
+        dir.path(),
+        "answers",
+        &format!("[ \"$1\" = --remediation ] || {{ touch {ran}; exit 1; }}\ncat >/dev/null\nprintf '  Restart it.\\n'"),
+        1000,
+    );
+    answers.config = serde_json::json!({"hint": 1});
+    let broken = check(dir.path(), "broken", "exit 4", 1000);
+    let silent = check(dir.path(), "silent", "cat >/dev/null", 1000);
+    let (_stop, rx) = watch::channel(false);
+    let service = Service::new(
+        Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            checks: vec![answers, broken, silent],
+        },
+        rx,
+    );
+    service.load_remediation().await;
+    let checks = service.snapshot().await;
+    let text = |name: &str| {
+        checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .remediation
+            .clone()
+    };
+    assert_eq!(text("answers"), "Restart it.");
+    assert_eq!(text("broken"), "");
+    assert_eq!(text("silent"), "");
+    assert!(checks
+        .iter()
+        .all(|c| c.state == State::Idle as i32 && c.run_id == 0));
+    assert!(!dir.path().join("ran").exists());
+}

@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
     let address = config.listen;
     let (stop, rx) = tokio::sync::watch::channel(false);
     let service = Service::new(config, rx);
+    service.load_remediation().await;
     service.start_health().await;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     println!("bitd listening on {address}");

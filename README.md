@@ -46,8 +46,14 @@ by aapis, not copied here. NixOS packaging supplies the locked aapis source.
 }
 ```
 
-Plugin ABI v1 is executable + stdin JSON + stdout logs + exit status. All
-plugins implement `plugin::BitCheck`. Independent checks run concurrently;
+Plugin ABI v2 is executable + stdin JSON + stdout logs + exit status. All
+plugins implement `plugin::BitCheck`, including `remediation()`: invoked with
+`--remediation` and the same stdin JSON, a plugin prints plain-text
+suggestions for when the check fails and exits 0 without checking anything.
+bitd queries every plugin once at startup (5 s deadline, 4 KiB cap) and
+exposes the text as `Check.remediation`; a plugin that cannot answer just
+leaves it empty. bitctl shows it under the highlighted check, and
+`list --json` includes it. Independent checks run concurrently;
 one check never overlaps itself. Health schedules skip missed ticks. All
 processes in the plugin's process group are killed on timeout or daemon stop.
 Run IDs and latest results are in memory and reset on daemon restart; journals
@@ -86,6 +92,7 @@ Initial plugins:
 
 `anixpkgs` provides `services.bitd.enable`, a merged list
 `services.bitd.checks`, and plugin definitions under `services.bitd.plugins`.
+It also installs bitctl with the shell alias `b`.
 Only selected plugin outputs enter the service configuration. Internet runs
 at 0.2 Hz on pc-base, Avahi at 0.2 Hz on personal/Jetson, and Cozy is installed
 only on personal-dell. Cozy's total daemon deadline defaults to 900 seconds;

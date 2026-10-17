@@ -10,6 +10,17 @@ struct Avahi {
 }
 #[async_trait]
 impl BitCheck for Avahi {
+    fn remediation(&self) -> String {
+        format!(
+            "Avahi could not serve {host}.\n\
+             - `systemctl status avahi-daemon`; restart it if inactive.\n\
+             - `avahi-resolve-host-name -4 {host}` should print this machine's IP.\n\
+             - A hostname clash on the LAN renames this host (e.g. -2.local); check \
+             `journalctl -u avahi-daemon`.\n\
+             - Ensure the firewall allows mDNS (UDP 5353).",
+            host = self.hostname
+        )
+    }
     async fn check(&self) -> Result<()> {
         ensure!(
             self.hostname.ends_with(".local") && !self.hostname.starts_with('-'),

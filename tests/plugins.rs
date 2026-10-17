@@ -287,3 +287,123 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         server.abort();
     }
 }
+fn fake_nvidia_smi(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let path = dir.join("nvidia-smi");
+    std::fs::write(
+        &path,
+        format!(
+            "#!{shell}\n[ \"$1\" = --query-gpu=index,enforced.power.limit,power.default_limit,name ] || exit 3\n{body}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+#[tokio::test]
+async fn nvidia_power_flags_capped_gpus() {
+    let cases = [
+        ("echo '0, 30.00, 30.00, RTX 500'", true, ""),
+        ("echo '0, 20.00, 30.00, RTX 500'", true, ""),
+        (
+            "echo '0, 6.00, 30.00, RTX 500'",
+            false,
+            "capped at 6.00 W of 30.00 W",
+        ),
+        (
+            "echo '0, [N/A], [N/A], A'; echo '1, 6.00, 30.00, B'",
+            false,
+            "GPU 1 (B) capped",
+        ),
+        ("echo '0, [N/A], [N/A], RTX 500'", false, "no GPU reported"),
+        ("echo 'garbage'", false, "unexpected nvidia-smi row"),
+        (
+            "echo 'no devices' >&2; exit 9",
+            false,
+            "nvidia-smi failed: no devices",
+        ),
+    ];
+    for (body, pass, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let smi = fake_nvidia_smi(dir.path(), body);
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-nvidia-power"),
+            json!({"nvidia_smi":smi}),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{body}: {text}");
+        assert!(text.contains(message), "{body}: {text}");
+    }
+    let output = plugin(
+        env!("CARGO_BIN_EXE_bit-check-nvidia-power"),
+        json!({"nvidia_smi":"/nonexistent/nvidia-smi"}),
+    )
+    .await;
+    assert!(!output.status.success());
+    for config in [json!({"bogus":1}), json!({"min_fraction":0.0})] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-nvidia-power"), config).await;
+        assert!(!output.status.success());
+    }
+}
+async fn remediation(binary: &str, config: Value) -> String {
+    let mut child = tokio::process::Command::new(binary)
+        .arg("--remediation")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(config.to_string().as_bytes())
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success(), "{binary}");
+    String::from_utf8(output.stdout).unwrap()
+}
+#[tokio::test]
+async fn every_plugin_gives_config_aware_remediation_without_checking() {
+    let (url, mock, server) = server("success").await;
+    let cases = [
+        (
+            env!("CARGO_BIN_EXE_bit-check-internet"),
+            json!({"urls":["https://example.invalid/204"]}),
+            "https://example.invalid/204",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-avahi"),
+            json!({"hostname":"box.local"}),
+            "avahi-resolve-host-name -4 box.local",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-nvidia-power"),
+            json!({"nvidia_smi":"/opt/nvidia-smi"}),
+            "/opt/nvidia-smi -q -d POWER",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-cozy-imgedit2"),
+            json!({"url":url,"token_file":"/secret/token","png_command":"/bin/png"}),
+            "/secret/token",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
+            json!({"url":url,"token_file":"/secret/token","workflow":"wf9"}),
+            "The wf9 job",
+        ),
+    ];
+    for (binary, config, expected) in cases {
+        let text = remediation(binary, config).await;
+        assert!(text.contains(expected), "{binary}: {text}");
+        assert!(!text.contains("check started"), "{binary}: {text}");
+    }
+    assert!(mock.requests.lock().unwrap().is_empty());
+    server.abort();
+}

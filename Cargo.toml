@@ -43,3 +43,6 @@ path = "src/bin/avahi.rs"
 [[bin]]
 name = "bit-check-cozy-imgedit2"
 path = "src/bin/cozy_imgedit2.rs"
+[[bin]]
+name = "bit-check-cozy-imggen-quantized"
+path = "src/bin/cozy_imggen_quantized.rs"

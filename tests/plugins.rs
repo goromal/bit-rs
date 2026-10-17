@@ -58,8 +58,15 @@ async fn endpoint(
         }
         "api/queue/add" => {
             let data: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(data["workflow"], "imgedit2");
-            assert_eq!(data["image"], "input-fixture.png");
+            if data["workflow"] == "imgedit2" {
+                assert_eq!(data["image"], "input-fixture.png");
+            } else {
+                assert_eq!(data["workflow"], "imggen-quantized");
+                assert_eq!(
+                    (data["width"].as_u64(), data["height"].as_u64()),
+                    (Some(128), Some(128))
+                );
+            }
             json!({"id":id})
         }
         "api/queue/start" | "api/queue/cancel" => json!({"ok":true}),
@@ -201,9 +208,14 @@ async fn cozy_tracks_result_validates_image_and_cleans_up_only_its_job() {
         if mode == "busy" {
             assert_eq!(requests.as_slice(), ["api/queue/status"]);
         }
-        if ["failed", "invalid", "timeout", "nored", "aspect"].contains(&mode) {
-            assert!(requests.contains(&"api/queue/cancel".to_string()));
-        }
+        // Jobs that never yielded a usable result are cancelled; a finished
+        // job whose output fails validation has nothing left to cancel.
+        let cancelled = requests.contains(&"api/queue/cancel".to_string());
+        assert_eq!(
+            cancelled,
+            ["failed", "invalid", "timeout"].contains(&mode),
+            "{mode}"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         if mode == "nored" {
             assert!(stderr.contains("no clear red markings"), "{stderr}");
@@ -241,4 +253,37 @@ async fn cozy_fails_before_queueing_when_png_fails() {
         ["api/queue/status"]
     );
     server.abort();
+}
+#[tokio::test]
+async fn cozy_imggen_checks_size_content_and_deadline() {
+    for mode in ["success", "aspect", "nored", "timeout", "failed", "busy"] {
+        let (url, mock, server) = server(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "test-token\n").unwrap();
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
+            json!({"url":url,"token_file":token,"max_seconds":1,"width":128,"height":128}),
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            mode == "success",
+            "{mode}: {stderr}"
+        );
+        let requests = mock.requests.lock().unwrap();
+        match mode {
+            "aspect" => assert!(stderr.contains("expected 128x128"), "{stderr}"),
+            "nored" => assert!(stderr.contains("blank"), "{stderr}"),
+            "timeout" => {
+                assert!(stderr.contains("no output within 1 seconds"), "{stderr}");
+                assert!(requests.contains(&"api/queue/cancel".to_string()));
+            }
+            "busy" => assert_eq!(requests.as_slice(), ["api/queue/status"]),
+            _ => {}
+        }
+        assert!(!requests.iter().any(|r| r.contains("upload")));
+        server.abort();
+    }
 }

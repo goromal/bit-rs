@@ -1,12 +1,10 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
-use bit_rs::plugin::BitCheck;
+use bit_rs::{cozy::CozyClient, plugin::BitCheck};
 use image::RgbImage;
-use reqwest::{multipart, Client};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{
-    io::Cursor,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -107,21 +105,8 @@ impl Cozy {
         );
         Ok(bytes)
     }
-    async fn run_job(&self, client: &Client) -> Result<()> {
-        let api = format!("{}/api", self.url.trim_end_matches('/'));
-        let status: Value = client
-            .get(format!("{api}/queue/status"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        ensure!(
-            status["active"] == false
-                && status["current"].is_null()
-                && status["jobs"].as_array().is_some_and(|a| a.is_empty()),
-            "Cozy queue is busy; retry when idle"
-        );
+    async fn run_job(&self, cozy: &CozyClient) -> Result<()> {
+        cozy.ensure_idle().await?;
         let seed = self.seed();
         let png = self.generate_input(&seed).await?;
         let baseline = red_fraction(&image::load_from_memory(&png)?.to_rgb8());
@@ -129,136 +114,37 @@ impl Cozy {
             "input seed={seed} size={}x{} red_baseline={baseline:.4}",
             self.width, self.height
         );
-        let form = multipart::Form::new().part(
-            "file",
-            multipart::Part::bytes(png)
-                .file_name("bitd-imgedit2.png")
-                .mime_str("image/png")?,
+        let input = cozy.upload_png(png, "bitd-imgedit2.png").await?;
+        let (id, output) = cozy
+            .run(
+                &json!({"workflow":"imgedit2", "prompt":PROMPT, "image":input}),
+                Duration::from_secs(self.max_seconds),
+            )
+            .await?;
+        let (want, got) = (
+            f64::from(self.width) / f64::from(self.height),
+            f64::from(output.width()) / f64::from(output.height()),
         );
-        let uploaded: Value = client
-            .post(format!("{api}/upload-image"))
-            .multipart(form)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let input = uploaded["value"]
-            .as_str()
-            .context("upload response missing value")?;
-        let queued: Value = client
-            .post(format!("{api}/queue/add"))
-            .json(&json!({"workflow":"imgedit2", "prompt":PROMPT, "image":input}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let id = queued["id"].as_str().context("queue response missing id")?;
         ensure!(
-            id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid queue id"
+            (got / want - 1.0).abs() <= 0.02,
+            "result {}x{} does not keep the {}x{} input's aspect ratio",
+            output.width(),
+            output.height(),
+            self.width,
+            self.height
         );
-        println!("cozy_imgedit2 job={id}");
-        let result = tokio::time::timeout(Duration::from_secs(self.max_seconds), async {
-            let started = client.post(format!("{api}/queue/start")).send().await?;
-            if started.status() != reqwest::StatusCode::CONFLICT {
-                started.error_for_status()?;
-            }
-            loop {
-                let status: Value = client
-                    .get(format!("{api}/queue/status"))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
-                if let Some(result) = status["results"]
-                    .as_array()
-                    .and_then(|rs| rs.iter().find(|r| r["id"] == id))
-                {
-                    ensure!(
-                        result["status"] == "success",
-                        "Cozy job failed: {}",
-                        result["error"]
-                    );
-                    let mut response = client
-                        .get(format!("{api}/queue/image"))
-                        .query(&[("id", id)])
-                        .send()
-                        .await?
-                        .error_for_status()?;
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) = response.chunk().await? {
-                        ensure!(
-                            bytes.len() + chunk.len() <= 50 * 1024 * 1024,
-                            "result image exceeds 50 MiB"
-                        );
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    let mut reader =
-                        image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-                    let mut limits = image::Limits::default();
-                    limits.max_image_width = Some(8192);
-                    limits.max_image_height = Some(8192);
-                    limits.max_alloc = Some(256 * 1024 * 1024);
-                    reader.limits(limits);
-                    let output = reader.decode().context("result is not a valid image")?;
-                    ensure!(output.width() > 0 && output.height() > 0, "empty image");
-                    let (want, got) = (
-                        f64::from(self.width) / f64::from(self.height),
-                        f64::from(output.width()) / f64::from(output.height()),
-                    );
-                    ensure!(
-                        (got / want - 1.0).abs() <= 0.02,
-                        "result {}x{} does not keep the {}x{} input's aspect ratio",
-                        output.width(),
-                        output.height(),
-                        self.width,
-                        self.height
-                    );
-                    let red = red_fraction(&output.to_rgb8());
-                    println!(
-                        "result {}x{} for job {id}: red={red:.4} baseline={baseline:.4}",
-                        output.width(),
-                        output.height()
-                    );
-                    ensure!(
-                        red - baseline >= self.min_red_fraction,
-                        "result has no clear red markings (red={red:.4}, baseline={baseline:.4}, need +{})",
-                        self.min_red_fraction
-                    );
-                    return Ok::<(), anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        })
-        .await;
-        match result {
-            Ok(Ok(())) => Ok(()),
-            other => {
-                // Cancel only our job, whether still pending or already running
-                // on the GPU; leave other work and completed results intact.
-                match client
-                    .post(format!("{api}/queue/cancel"))
-                    .json(&json!({"id":id}))
-                    .send()
-                    .await
-                {
-                    Ok(r) if r.status().is_success() => println!("cancelled Cozy job {id}"),
-                    Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {}
-                    Ok(r) => println!("cancel of Cozy job {id} failed: HTTP {}", r.status()),
-                    Err(e) => println!("cancel of Cozy job {id} failed: {e}"),
-                }
-                match other {
-                    Ok(Err(e)) => Err(e),
-                    _ => bail!(
-                        "job {id} produced no output within {} seconds; cancelled",
-                        self.max_seconds
-                    ),
-                }
-            }
-        }
+        let red = red_fraction(&output.to_rgb8());
+        println!(
+            "result {}x{} for job {id}: red={red:.4} baseline={baseline:.4}",
+            output.width(),
+            output.height()
+        );
+        ensure!(
+            red - baseline >= self.min_red_fraction,
+            "result has no clear red markings (red={red:.4}, baseline={baseline:.4}, need +{})",
+            self.min_red_fraction
+        );
+        Ok(())
     }
 }
 #[async_trait]
@@ -279,19 +165,8 @@ impl BitCheck for Cozy {
                 .map_or(true, |s| !s.is_empty() && !s.contains(['-', '/'])),
             "seed must be non-empty without '-' or '/'"
         );
-        let token =
-            std::fs::read_to_string(&self.token_file).context("read Cozy API token file")?;
-        ensure!(!token.trim().is_empty(), "empty Cozy API token");
-        let mut headers = reqwest::header::HeaderMap::new();
-        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.trim()))?;
-        auth.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, auth);
-        let client = Client::builder()
-            .default_headers(headers)
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        self.run_job(&client).await
+        let cozy = CozyClient::new(&self.url, &self.token_file)?;
+        self.run_job(&cozy).await
     }
 }
 #[tokio::main]

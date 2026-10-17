@@ -1,4 +1,5 @@
 pub mod config;
+pub mod cozy;
 pub mod daemon;
 pub mod plugin;
 #[allow(clippy::result_large_err)] // tonic's generated API returns tonic::Status.

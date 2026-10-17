@@ -75,6 +75,11 @@ Initial plugins:
   `/api/queue/cancel`, which removes it if pending or interrupts it in ComfyUI
   if running. Uploaded inputs and completed outputs remain in Cozy for
   inspection. It never clears the shared queue or restarts ComfyUI.
+* `cozy_imggen_quantized`: requires `url` and `token_file`. Requires an idle
+  Cozy queue, queues one `workflow` (default `imggen-quantized`) generate job at
+  `width`×`height` (default 500×500), and passes when a result of exactly that
+  size and not blank arrives within `max_seconds` (default 60). Otherwise it
+  fails and cancels its own job.
 
 ## NixOS
 

@@ -41,6 +41,32 @@ fn state(c: &Check) -> State {
 fn json(c: &Check) -> serde_json::Value {
     serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms})
 }
+/// Age as its two largest units, e.g. "5s", "1m 30s", "6d 5h".
+fn ago(ms: u64) -> String {
+    let s = ms / 1000;
+    let (d, h, m) = (s / 86_400, s / 3_600 % 24, s / 60 % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, _) => format!("{m}m {}s", s % 60),
+        (0, _, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+/// When the check last ran, relative to `now_ms` (Unix epoch milliseconds).
+fn last_run(c: &Check, now_ms: i64) -> String {
+    if state(c) == State::Running {
+        return "now".into();
+    }
+    match c.finished_unix_ms.max(c.started_unix_ms) {
+        at if at <= 0 => "never".into(),
+        at => format!("{} ago", ago(now_ms.saturating_sub(at).max(0) as u64)),
+    }
+}
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 fn print_checks(checks: &[Check]) {
     for c in checks {
         println!("{:<24} {:<12} {}", c.name, state(c).as_str_name(), c.detail);
@@ -144,6 +170,7 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                     .block(Block::default().borders(Borders::ALL)),
                 areas[0],
             );
+            let now = now_ms();
             let rows = checks.iter().map(|c| {
                 let color = match state(c) {
                     State::Passed => Color::Green,
@@ -159,19 +186,19 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                         "regression".into()
                     }),
                     Cell::from(format!("{:?}", state(c))).style(Style::default().fg(color)),
-                    Cell::from(format!("#{}", c.run_id)),
+                    Cell::from(last_run(c, now)),
                 ])
             });
             let table = Table::new(
                 rows,
                 [
-                    Constraint::Percentage(40),
-                    Constraint::Percentage(30),
+                    Constraint::Percentage(35),
+                    Constraint::Percentage(25),
                     Constraint::Percentage(20),
-                    Constraint::Percentage(10),
+                    Constraint::Percentage(20),
                 ],
             )
-            .header(Row::new(["Check", "Kind", "Status", "Run"]).bold())
+            .header(Row::new(["Check", "Kind", "Status", "Last run"]).bold())
             .row_highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol("› ");
             f.render_stateful_widget(table, areas[1], &mut selection);
@@ -225,4 +252,47 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(state: State, started: i64, finished: i64) -> Check {
+        Check {
+            state: state as i32,
+            started_unix_ms: started,
+            finished_unix_ms: finished,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn last_run_is_relative_and_compact() {
+        let now = 1_000_000_000_000;
+        assert_eq!(last_run(&check(State::Idle, 0, 0), now), "never");
+        assert_eq!(last_run(&check(State::Running, now - 9_000, 0), now), "now");
+        assert_eq!(
+            last_run(&check(State::Passed, now - 6_000, now - 5_400), now),
+            "5s ago"
+        );
+        assert_eq!(
+            last_run(&check(State::Failed, 0, now - 90_000), now),
+            "1m 30s ago"
+        );
+        assert_eq!(
+            last_run(&check(State::Passed, 0, now - 7_500_000), now),
+            "2h 5m ago"
+        );
+        let six_days_five_hours = (6 * 86_400 + 5 * 3_600 + 59) * 1000;
+        assert_eq!(
+            last_run(&check(State::Passed, 0, now - six_days_five_hours), now),
+            "6d 5h ago"
+        );
+        // A clock that steps backwards never yields a negative age.
+        assert_eq!(
+            last_run(&check(State::Passed, 0, now + 4_000), now),
+            "0s ago"
+        );
+    }
 }

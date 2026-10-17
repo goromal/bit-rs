@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: goromal/aapis
-          ref: 6f4d57da71668e52cbc6e857accdbc8c4b2eedc6
+          ref: 129df89d276cf1c9365664bc4574c16f28e61df0
           path: aapis
       - uses: dtolnay/rust-toolchain@stable
         with:

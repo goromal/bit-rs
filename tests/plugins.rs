@@ -274,7 +274,7 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         );
         let requests = mock.requests.lock().unwrap();
         match mode {
-            "aspect" => assert!(stderr.contains("expected 130x130"), "{stderr}"),
+            "aspect" => assert!(stderr.contains("times a whole factor"), "{stderr}"),
             "nored" => assert!(stderr.contains("blank"), "{stderr}"),
             "timeout" => {
                 assert!(stderr.contains("no output within 1 seconds"), "{stderr}");

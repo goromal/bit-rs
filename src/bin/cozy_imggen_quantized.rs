@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 use async_trait::async_trait;
 use bit_rs::{cozy::CozyClient, plugin::BitCheck};
 use serde::Deserialize;
@@ -31,6 +31,13 @@ fn side() -> u32 {
 
 const PROMPT: &str = "A red apple on a wooden table, soft daylight, photograph.";
 
+/// The whole factor k (1..=8) with got == base * k on both axes, where base is
+/// the requested size either exact or floored to a multiple of 8.
+fn scale_factor(got: (u32, u32), want: (u32, u32)) -> Option<u32> {
+    let bases = [want, (want.0 - want.0 % 8, want.1 - want.1 % 8)];
+    (1..=8).find(|k| bases.iter().any(|b| (b.0 * k, b.1 * k) == got))
+}
+
 #[async_trait]
 impl BitCheck for Cozy {
     async fn check(&self) -> Result<()> {
@@ -50,16 +57,19 @@ impl BitCheck for Cozy {
             )
             .await?;
         // Latent models emit the requested size floored to their 8-px grid
-        // (500 -> 496); anything else means the request was not honoured.
-        let fits = |got: u32, want: u32| got <= want && got >= want - want % 8;
-        ensure!(
-            fits(output.width(), self.width) && fits(output.height(), self.height),
-            "result {}x{} for job {id}, expected {}x{} (or floored to a multiple of 8)",
-            output.width(),
-            output.height(),
-            self.width,
-            self.height
-        );
+        // (500 -> 496), and some workflows then upscale by a whole factor
+        // (imggen-quantized: ImageScaleBy 4x -> 1984). Anything else means the
+        // request was not honoured.
+        let scale = scale_factor((output.width(), output.height()), (self.width, self.height));
+        let Some(scale) = scale else {
+            bail!(
+                "result {}x{} for job {id} is not {}x{} (floored to a multiple of 8) times a whole factor",
+                output.width(),
+                output.height(),
+                self.width,
+                self.height
+            );
+        };
         let luma = output.to_luma8();
         let (lo, hi) = luma.pixels().fold((u8::MAX, u8::MIN), |(lo, hi), p| {
             (lo.min(p[0]), hi.max(p[0]))
@@ -69,7 +79,7 @@ impl BitCheck for Cozy {
             "result for job {id} is blank (luma {lo}..={hi})"
         );
         println!(
-            "valid {}x{} result for job {id} (luma {lo}..={hi})",
+            "valid {}x{} result for job {id} ({scale}x upscale, luma {lo}..={hi})",
             output.width(),
             output.height()
         );
@@ -79,4 +89,20 @@ impl BitCheck for Cozy {
 #[tokio::main]
 async fn main() -> Result<()> {
     bit_rs::plugin::run::<Cozy>().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_factor;
+
+    #[test]
+    fn accepts_grid_floor_and_whole_upscales_only() {
+        assert_eq!(scale_factor((500, 500), (500, 500)), Some(1));
+        assert_eq!(scale_factor((496, 496), (500, 500)), Some(1));
+        assert_eq!(scale_factor((1984, 1984), (500, 500)), Some(4));
+        assert_eq!(scale_factor((2000, 2000), (500, 500)), Some(4));
+        assert_eq!(scale_factor((1984, 992), (500, 500)), None);
+        assert_eq!(scale_factor((1000, 1000), (512, 512)), None);
+        assert_eq!(scale_factor((1024, 768), (512, 512)), None);
+    }
 }

@@ -41,15 +41,33 @@ fn state(c: &Check) -> State {
 fn json(c: &Check) -> serde_json::Value {
     serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms,"remediation":c.remediation})
 }
-/// Age as its two largest units, e.g. "5s", "1m 30s", "6d 5h".
+/// Duration as its two largest units, e.g. "5s", "1m 30s", "6d 5h"; a zero
+/// second unit is dropped ("5m", not "5m 0s").
 fn ago(ms: u64) -> String {
     let s = ms / 1000;
     let (d, h, m) = (s / 86_400, s / 3_600 % 24, s / 60 % 60);
-    match (d, h, m) {
-        (0, 0, 0) => format!("{s}s"),
-        (0, 0, _) => format!("{m}m {}s", s % 60),
-        (0, _, _) => format!("{h}h {m}m"),
-        _ => format!("{d}d {h}h"),
+    let (big, small) = match (d, h, m) {
+        (0, 0, 0) => return format!("{s}s"),
+        (0, 0, _) => ((m, "m"), (s % 60, "s")),
+        (0, _, _) => ((h, "h"), (m, "m")),
+        _ => ((d, "d"), (h, "h")),
+    };
+    match small.0 {
+        0 => format!("{}{}", big.0, big.1),
+        _ => format!("{}{} {}{}", big.0, big.1, small.0, small.1),
+    }
+}
+/// Health checks show their period (1 / rate) in the same units as "Last run".
+fn kind(c: &Check) -> String {
+    if c.kind != Kind::Health as i32 {
+        return "regression".into();
+    }
+    match c.rate_hz {
+        r if r > 0.0 && r.is_finite() => match (1000.0 / r).round() as u64 {
+            ms if ms < 1000 => format!("health · every {ms}ms"),
+            ms => format!("health · every {}", ago(ms)),
+        },
+        _ => "health".into(),
     }
 }
 /// When the check last ran, relative to `now_ms` (Unix epoch milliseconds).
@@ -212,11 +230,7 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                 };
                 Row::new(vec![
                     Cell::from(c.name.clone()),
-                    Cell::from(if c.kind == Kind::Health as i32 {
-                        format!("health · {} Hz", c.rate_hz)
-                    } else {
-                        "regression".into()
-                    }),
+                    Cell::from(kind(c)),
                     Cell::from(format!("{:?}", state(c))).style(Style::default().fg(color)),
                     Cell::from(last_run(c, now)),
                 ])
@@ -230,7 +244,7 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                     Constraint::Percentage(20),
                 ],
             )
-            .header(Row::new(["Check", "Kind", "Status", "Last run"]).bold())
+            .header(Row::new(["Check", "Kind · period", "Status", "Last run"]).bold())
             .row_highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol("› ");
             f.render_stateful_widget(table, areas[1], &mut selection);
@@ -312,6 +326,21 @@ mod tests {
     }
 
     #[test]
+    fn health_shows_period_in_last_run_units() {
+        let health = |rate_hz| Check {
+            kind: Kind::Health as i32,
+            rate_hz,
+            ..Default::default()
+        };
+        assert_eq!(kind(&health(0.2)), "health · every 5s");
+        assert_eq!(kind(&health(1.0 / 300.0)), "health · every 5m");
+        assert_eq!(kind(&health(1.0 / 90.0)), "health · every 1m 30s");
+        assert_eq!(kind(&health(4.0)), "health · every 250ms");
+        assert_eq!(kind(&health(0.0)), "health");
+        assert_eq!(kind(&Check::default()), "regression");
+    }
+
+    #[test]
     fn remediation_falls_back_and_sizes_by_wrapping() {
         assert!(remediation_text(&Check::default()).starts_with("No suggestions"));
         assert_eq!(wrapped_rows("abc\n\nabcdefghij", 5), 4);
@@ -336,6 +365,10 @@ mod tests {
         assert_eq!(
             last_run(&check(State::Passed, 0, now - 7_500_000), now),
             "2h 5m ago"
+        );
+        assert_eq!(
+            last_run(&check(State::Passed, 0, now - 300_000), now),
+            "5m ago"
         );
         let six_days_five_hours = (6 * 86_400 + 5 * 3_600 + 59) * 1000;
         assert_eq!(

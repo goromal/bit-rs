@@ -92,6 +92,7 @@ Initial plugins:
 
 `anixpkgs` provides `services.bitd.enable`, a merged list
 `services.bitd.checks`, and plugin definitions under `services.bitd.plugins`.
+It also installs bitctl with the shell alias `b`.
 Only selected plugin outputs enter the service configuration. Internet runs
 at 0.2 Hz on pc-base, Avahi at 0.2 Hz on personal/Jetson, and Cozy is installed
 only on personal-dell. Cozy's total daemon deadline defaults to 900 seconds;

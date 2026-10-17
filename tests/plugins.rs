@@ -182,6 +182,28 @@ fn fake_png(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
+/// Executable script with `body`, for fake external tools.
+fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!{shell}\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+/// Fake ComfyUI restart: appends its arguments to `<dir>/restarts`.
+fn fake_restart(dir: &std::path::Path) -> (Value, std::path::PathBuf) {
+    let log = dir.join("restarts");
+    let path = script(
+        dir,
+        "restart",
+        &format!("echo \"$@\" >> '{}'", log.display()),
+    );
+    (json!([path, "restart", "comfyui.service"]), log)
+}
+fn restarts(log: &std::path::Path) -> String {
+    std::fs::read_to_string(log).unwrap_or_default()
+}
 #[tokio::test]
 async fn cozy_tracks_result_validates_image_and_cleans_up_only_its_job() {
     for mode in [
@@ -192,12 +214,21 @@ async fn cozy_tracks_result_validates_image_and_cleans_up_only_its_job() {
         let token = dir.path().join("token");
         std::fs::write(&token, "test-token\n").unwrap();
         let png = fake_png(dir.path());
+        let (restart, log) = fake_restart(dir.path());
         let output = plugin(
             env!("CARGO_BIN_EXE_bit-check-cozy-imgedit2"),
             json!({"url":url,"token_file":token,"max_seconds":1,"png_command":png,
-                   "seed":"seed7","width":64,"height":64}),
+                   "seed":"seed7","width":64,"height":64,"restart_command":restart}),
         )
         .await;
+        // Every submitted job ends with exactly one restart; a busy queue
+        // means someone else's job, which must not be disturbed.
+        let expected = if mode == "busy" {
+            ""
+        } else {
+            "restart comfyui.service\n"
+        };
+        assert_eq!(restarts(&log), expected, "{mode}");
         assert_eq!(
             output.status.success(),
             mode == "success",
@@ -241,13 +272,15 @@ async fn cozy_fails_before_queueing_when_png_fails() {
     let token = dir.path().join("token");
     std::fs::write(&token, "test-token\n").unwrap();
     let png = fake_png(dir.path());
+    let (restart, log) = fake_restart(dir.path());
     let output = plugin(
         env!("CARGO_BIN_EXE_bit-check-cozy-imgedit2"),
         json!({"url":url,"token_file":token,"png_command":png,"seed":"other",
-               "width":64,"height":64}),
+               "width":64,"height":64,"restart_command":restart}),
     )
     .await;
     assert!(!output.status.success());
+    assert_eq!(restarts(&log), "");
     assert_eq!(
         mock.requests.lock().unwrap().as_slice(),
         ["api/queue/status"]
@@ -261,11 +294,19 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let token = dir.path().join("token");
         std::fs::write(&token, "test-token\n").unwrap();
+        let (restart, log) = fake_restart(dir.path());
         let output = plugin(
             env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
-            json!({"url":url,"token_file":token,"max_seconds":1,"width":130,"height":130}),
+            json!({"url":url,"token_file":token,"max_seconds":1,"width":130,"height":130,
+                   "restart_command":restart}),
         )
         .await;
+        let expected = if mode == "busy" {
+            ""
+        } else {
+            "restart comfyui.service\n"
+        };
+        assert_eq!(restarts(&log), expected, "{mode}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.success(),
@@ -285,6 +326,145 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         }
         assert!(!requests.iter().any(|r| r.contains("upload")));
         server.abort();
+    }
+}
+#[tokio::test]
+async fn cozy_fails_when_comfyui_restart_fails_but_reports_job_errors_first() {
+    for (mode, restart, expected) in [
+        ("success", "exit 1", "ComfyUI restart failed"),
+        ("failed", "exit 1", "Cozy job failed"),
+        ("success", "exit 0", ""),
+    ] {
+        let (url, _mock, server) = server(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "test-token\n").unwrap();
+        let restart = script(dir.path(), "restart", restart);
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
+            json!({"url":url,"token_file":token,"max_seconds":1,"width":130,"height":130,
+                   "restart_command":[restart]}),
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), expected.is_empty(), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+        server.abort();
+    }
+}
+/// MAVLink v2 HEARTBEAT from `system_id` with `autopilot`, CRC included.
+fn heartbeat(system_id: u8, autopilot: u8) -> Vec<u8> {
+    let mut frame = vec![
+        0xfd, 9, 0, 0, 0, system_id, 1, 0, 0, 0, 0, 0, 0, 0, 2, autopilot, 0x51, 3, 3,
+    ];
+    let mut crc: u16 = 0xffff;
+    for &b in frame[1..].iter().chain(std::iter::once(&50u8)) {
+        let mut tmp = b ^ (crc & 0xff) as u8;
+        tmp ^= tmp << 4;
+        crc = (crc >> 8) ^ (u16::from(tmp) << 8) ^ (u16::from(tmp) << 3) ^ (u16::from(tmp) >> 4);
+    }
+    frame.extend_from_slice(&crc.to_le_bytes());
+    frame
+}
+/// A one-connection MAVLink TCP endpoint that streams `frames` in small chunks.
+async fn mavlink_server(frames: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            for chunk in frames.chunks(7) {
+                if stream.write_all(chunk).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            // Hold the connection open like a quiet router.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+    (address, handle)
+}
+#[tokio::test]
+async fn ardupilot_needs_an_autopilot_heartbeat() {
+    let binary = env!("CARGO_BIN_EXE_bit-check-ardupilot");
+    let mut gcs_then_copter = heartbeat(255, 8);
+    gcs_then_copter.extend(heartbeat(1, 3));
+    for (frames, system_id, passes) in [
+        (gcs_then_copter.clone(), json!(1), true),
+        (gcs_then_copter, json!(2), false),
+        (heartbeat(255, 8), json!(null), false),
+        (vec![], json!(null), false),
+    ] {
+        let (address, server) = mavlink_server(frames).await;
+        let output = plugin(
+            binary,
+            json!({"address":address,"max_seconds":0.5,"system_id":system_id}),
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), passes, "{stdout}");
+        if !passes {
+            assert!(stdout.contains("no autopilot heartbeat"), "{stdout}");
+        }
+        server.abort();
+    }
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = closed.local_addr().unwrap().to_string();
+    drop(closed);
+    let output = plugin(binary, json!({"address":address})).await;
+    assert!(!output.status.success());
+    assert!(!plugin(binary, json!({"address":"x:1","max_seconds":0}))
+        .await
+        .status
+        .success());
+}
+/// Fake `ros2`: `topic echo --once --no-daemon ... <topic> [type]` behaves per topic.
+fn fake_ros2(dir: &std::path::Path) -> std::path::PathBuf {
+    script(
+        dir,
+        "ros2",
+        r#"[ "$1 $2 $3 $4" = "topic echo --once --no-daemon" ] || exit 9
+[ -n "$ROS_HOME" ] && [ -n "$ROS_LOG_DIR" ] || exit 8
+for topic; do :; done
+case "$*" in
+  */ap/time*) echo "sec: 1"; echo "nanosec: 2" ;;
+  */silent*) exec sleep 30 ;;
+  */empty*) exit 0 ;;
+  *) echo "WARNING: topic [$topic] does not appear to be published yet"; exit 1 ;;
+esac"#,
+    )
+}
+#[tokio::test]
+async fn ros2_topics_need_a_message_on_every_topic() {
+    let dir = tempfile::tempdir().unwrap();
+    let ros2 = fake_ros2(dir.path());
+    let binary = env!("CARGO_BIN_EXE_bit-check-ros2-topics");
+    let topic = |name: &str| json!({"name":name, "type":"builtin_interfaces/msg/Time"});
+    for (topics, expected) in [
+        (json!([topic("/ap/time")]), ""),
+        (json!([{"name":"/ap/time"}, topic("/ap/time")]), ""),
+        (
+            json!([topic("/ap/time"), topic("/silent")]),
+            "no message on /silent within 0.5 s",
+        ),
+        (json!([topic("/empty")]), "exited without a message"),
+        (
+            json!([{"name":"/missing"}]),
+            "does not appear to be published",
+        ),
+        (json!([]), "topics must not be empty"),
+        (json!([{"name":"no_slash"}]), "invalid topic name"),
+    ] {
+        let started = std::time::Instant::now();
+        let output = plugin(
+            binary,
+            json!({"ros2":ros2,"topics":topics,"max_seconds":0.5}),
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), expected.is_empty(), "{stdout}");
+        assert!(stdout.contains(expected), "{stdout}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }
 fn fake_nvidia_smi(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -397,6 +577,16 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
             json!({"url":url,"token_file":"/secret/token","workflow":"wf9"}),
             "The wf9 job",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-ardupilot"),
+            json!({"address":"127.0.0.1:5790"}),
+            "ss -tlnp | grep 5790",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-ros2-topics"),
+            json!({"ros2":"/bin/ros2","topics":[{"name":"/ap/time"}]}),
+            "each of /ap/time",
         ),
     ];
     for (binary, config, expected) in cases {

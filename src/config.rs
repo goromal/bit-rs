@@ -23,6 +23,9 @@ pub struct CheckConfig {
     #[serde(default)]
     pub rate_hz: Option<f64>,
     pub timeout_ms: u64,
+    /// Regression only: run alone, never alongside another regression check.
+    #[serde(default)]
+    pub exclusive: bool,
     #[serde(default = "empty_object")]
     pub config: serde_json::Value,
 }
@@ -59,6 +62,9 @@ impl Config {
                     "{}: health requires rate_hz in 0.00001..=100; regression must omit it",
                     c.name
                 ),
+            }
+            if c.exclusive && c.kind != Kind::Regression {
+                bail!("{}: only regression checks can be exclusive", c.name);
             }
             if !c.config.is_object() {
                 bail!("{}: config must be an object", c.name);

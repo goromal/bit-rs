@@ -77,8 +77,8 @@ Initial plugins:
   inspection. It never clears the shared queue or restarts ComfyUI.
 * `cozy_imggen_quantized`: requires `url` and `token_file`. Requires an idle
   Cozy queue, queues one `workflow` (default `imggen-quantized`) generate job at
-  `width`×`height` (default 500×500), and passes when a result of exactly that
-  size and not blank arrives within `max_seconds` (default 60). Otherwise it
+  `width`×`height` (default 500×500), and passes when a result of that size (or
+  floored to the model's 8-px latent grid, e.g. 500 → 496) and not blank arrives within `max_seconds` (default 60). Otherwise it
   fails and cancels its own job.
 
 ## NixOS

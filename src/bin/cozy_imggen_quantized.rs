@@ -49,9 +49,12 @@ impl BitCheck for Cozy {
                 Duration::from_secs(self.max_seconds),
             )
             .await?;
+        // Latent models emit the requested size floored to their 8-px grid
+        // (500 -> 496); anything else means the request was not honoured.
+        let fits = |got: u32, want: u32| got <= want && got >= want - want % 8;
         ensure!(
-            (output.width(), output.height()) == (self.width, self.height),
-            "result {}x{} for job {id}, expected {}x{}",
+            fits(output.width(), self.width) && fits(output.height(), self.height),
+            "result {}x{} for job {id}, expected {}x{} (or floored to a multiple of 8)",
             output.width(),
             output.height(),
             self.width,

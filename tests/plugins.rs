@@ -64,7 +64,7 @@ async fn endpoint(
                 assert_eq!(data["workflow"], "imggen-quantized");
                 assert_eq!(
                     (data["width"].as_u64(), data["height"].as_u64()),
-                    (Some(128), Some(128))
+                    (Some(130), Some(130))
                 );
             }
             json!({"id":id})
@@ -263,7 +263,7 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         std::fs::write(&token, "test-token\n").unwrap();
         let output = plugin(
             env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
-            json!({"url":url,"token_file":token,"max_seconds":1,"width":128,"height":128}),
+            json!({"url":url,"token_file":token,"max_seconds":1,"width":130,"height":130}),
         )
         .await;
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -274,7 +274,7 @@ async fn cozy_imggen_checks_size_content_and_deadline() {
         );
         let requests = mock.requests.lock().unwrap();
         match mode {
-            "aspect" => assert!(stderr.contains("expected 128x128"), "{stderr}"),
+            "aspect" => assert!(stderr.contains("expected 130x130"), "{stderr}"),
             "nored" => assert!(stderr.contains("blank"), "{stderr}"),
             "timeout" => {
                 assert!(stderr.contains("no output within 1 seconds"), "{stderr}");

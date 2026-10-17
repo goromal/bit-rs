@@ -31,6 +31,7 @@ async fn grpc_and_cli_round_trip() {
                 command,
                 rate_hz: None,
                 timeout_ms: 1000,
+                exclusive: false,
                 config: serde_json::json!({}),
             }],
         },

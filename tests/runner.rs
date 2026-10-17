@@ -17,6 +17,7 @@ fn check(dir: &std::path::Path, name: &str, body: &str, timeout_ms: u64) -> Chec
         kind: Kind::Regression,
         rate_hz: None,
         timeout_ms,
+        exclusive: false,
         config: serde_json::json!({}),
     }
 }
@@ -72,6 +73,97 @@ async fn parallel_outcomes_and_atomic_rejection() {
     assert!(finished
         .iter()
         .all(|c| c.finished_unix_ms >= c.started_unix_ms && c.run_id == 1));
+}
+#[tokio::test]
+async fn exclusive_regressions_run_alone_and_health_keeps_going() {
+    let dir = tempfile::tempdir().unwrap();
+    // Each regression records its start and end; overlaps show up as an
+    // exclusive check's interval intersecting another's.
+    let log = dir.path().join("log");
+    let body = |tag: &str| {
+        format!(
+            "echo start {tag} >> '{0}'; sleep 0.3; echo end {tag} >> '{0}'",
+            log.display()
+        )
+    };
+    let mut a = check(dir.path(), "a_exclusive", &body("a"), 2000);
+    a.exclusive = true;
+    let mut b = check(dir.path(), "b_exclusive", &body("b"), 2000);
+    b.exclusive = true;
+    let c = check(dir.path(), "c_shared", &body("c"), 2000);
+    let d = check(dir.path(), "d_shared", &body("d"), 2000);
+    let mut health = check(dir.path(), "health", "exit 0", 1000);
+    health.kind = Kind::Health;
+    health.rate_hz = Some(0.001);
+    let config = Config {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        checks: vec![a, b, c, d, health],
+    };
+    config.validate().unwrap();
+    let (_stop, rx) = watch::channel(false);
+    let service = Service::new(config, rx);
+    let started = service.launch(vec![]).await.unwrap();
+    assert_eq!(started.len(), 4);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Health is never held back by an exclusive regression.
+    service.launch(vec!["health".into()]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let health = service.snapshot().await.pop().unwrap();
+    assert_eq!(health.state, State::Passed as i32);
+    let finished = settled(&service).await;
+    assert!(finished.iter().all(|c| c.state == State::Passed as i32));
+    let log = std::fs::read_to_string(&log).unwrap();
+    let events: Vec<&str> = log.lines().collect();
+    assert_eq!(events.len(), 8);
+    let mut running = Vec::new();
+    for event in events {
+        let (what, tag) = event.split_once(' ').unwrap();
+        if what == "start" {
+            let exclusive = ["a", "b"].contains(&tag);
+            assert!(
+                running.is_empty()
+                    || (!exclusive && !running.iter().any(|t| ["a", "b"].contains(t))),
+                "{tag} started while {running:?} ran"
+            );
+            running.push(tag);
+        } else {
+            running.retain(|t| *t != tag);
+        }
+    }
+    // Queued time does not count against the timeout or the reported start.
+    assert!(finished
+        .iter()
+        .all(|c| c.finished_unix_ms - c.started_unix_ms < 1000));
+}
+#[tokio::test]
+async fn shutdown_fails_queued_regressions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = check(dir.path(), "a", "sleep 5", 10000);
+    a.exclusive = true;
+    let b = check(dir.path(), "b", "exit 0", 1000);
+    let (stop, rx) = watch::channel(false);
+    let service = Service::new(
+        Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            checks: vec![a, b],
+        },
+        rx,
+    );
+    service.launch(vec!["a".into()]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    service.launch(vec!["b".into()]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let queued = service.snapshot().await;
+    assert_eq!(queued[1].state, State::Running as i32);
+    assert!(
+        queued[1].detail.starts_with("queued"),
+        "{}",
+        queued[1].detail
+    );
+    stop.send(true).unwrap();
+    let finished = settled(&service).await;
+    assert!(finished.iter().all(|c| c.state == State::Failed as i32));
+    assert!(finished.iter().all(|c| c.detail == "daemon stopped"));
 }
 #[tokio::test]
 async fn health_schedule_never_overlaps_and_regressions_stay_idle() {
@@ -144,6 +236,12 @@ fn reject_invalid_configuration() {
     }
     config.checks[0].rate_hz = Some(0.2);
     config.validate().unwrap();
+    config.checks[0].exclusive = true;
+    assert!(
+        config.validate().is_err(),
+        "health checks cannot be exclusive"
+    );
+    config.checks[0].exclusive = false;
     config.checks.push(config.checks[0].clone());
     assert!(config.validate().is_err());
 }

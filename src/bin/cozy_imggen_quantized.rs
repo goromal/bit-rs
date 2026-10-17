@@ -18,6 +18,10 @@ struct Cozy {
     width: u32,
     #[serde(default = "side")]
     height: u32,
+    /// Argv run after each job to restart ComfyUI and free its memory;
+    /// empty to skip.
+    #[serde(default)]
+    restart_command: Vec<String>,
 }
 fn max_seconds() -> u64 {
     60
@@ -54,7 +58,7 @@ impl BitCheck for Cozy {
             (64..=2048).contains(&self.width) && (64..=2048).contains(&self.height),
             "width and height must be within 64..=2048"
         );
-        let cozy = CozyClient::new(&self.url, &self.token_file)?;
+        let cozy = CozyClient::new(&self.url, &self.token_file, &self.restart_command)?;
         cozy.ensure_idle().await?;
         let (id, output) = cozy
             .run(

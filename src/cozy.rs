@@ -3,6 +3,8 @@
 //! A check requires an idle queue, submits exactly one job, and tracks it by
 //! ID. If no valid output arrives within the deadline (or the job fails), it
 //! cancels only its own job and leaves other work and finished results alone.
+//! Once its job has ended, either way, it runs the configured restart command
+//! so ComfyUI hands back the RAM its loaded models hold.
 
 use anyhow::{bail, ensure, Context, Result};
 use image::DynamicImage;
@@ -12,6 +14,7 @@ use std::{io::Cursor, path::Path, time::Duration};
 
 const POLL: Duration = Duration::from_secs(2);
 const MAX_RESULT_BYTES: usize = 50 * 1024 * 1024;
+const RESTART_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Shared remediation text for the cozy_* regression plugins.
 pub fn remediation(url: &str, token_file: &Path, workflow: &str, max_seconds: u64) -> String {
@@ -21,7 +24,9 @@ pub fn remediation(url: &str, token_file: &Path, workflow: &str, max_seconds: u6
          - Slow runs: check the nvidia_power health check (a capped GPU makes jobs \
          ~10x slower) and compare s/it in the ComfyUI log with past runs.\n\
          - \"Cozy queue is busy\": wait for other Cozy jobs to finish, then rerun.\n\
-         - 401/403: the token in {} must match Cozy's api_token_hash.",
+         - 401/403: the token in {} must match Cozy's api_token_hash.\n\
+         - \"ComfyUI restart failed\": bitd's user needs permission to restart \
+         comfyui.service (the comfyui module's polkit rule).",
         token_file.display()
     )
 }
@@ -29,10 +34,12 @@ pub fn remediation(url: &str, token_file: &Path, workflow: &str, max_seconds: u6
 pub struct CozyClient {
     api: String,
     client: Client,
+    restart_command: Vec<String>,
 }
 
 impl CozyClient {
-    pub fn new(url: &str, token_file: &Path) -> Result<Self> {
+    /// `restart_command` (argv; empty to skip) restarts ComfyUI after each job.
+    pub fn new(url: &str, token_file: &Path, restart_command: &[String]) -> Result<Self> {
         let token = std::fs::read_to_string(token_file).context("read Cozy API token file")?;
         ensure!(!token.trim().is_empty(), "empty Cozy API token");
         let mut headers = reqwest::header::HeaderMap::new();
@@ -47,6 +54,7 @@ impl CozyClient {
         Ok(Self {
             api: format!("{}/api", url.trim_end_matches('/')),
             client,
+            restart_command: restart_command.to_vec(),
         })
     }
 
@@ -109,7 +117,39 @@ impl CozyClient {
 
     /// Queue `spec`, start the queue, and return the decoded result image.
     /// Fails as soon as `max` passes without a result, cancelling the job.
+    /// Restarts ComfyUI afterwards whether or not the job succeeded; a failed
+    /// restart fails the check, since ComfyUI would keep holding its memory.
     pub async fn run(&self, spec: &Value, max: Duration) -> Result<(String, DynamicImage)> {
+        let result = self.run_job(spec, max).await;
+        let restarted = self.restart_comfyui().await;
+        let output = result?;
+        restarted?;
+        Ok(output)
+    }
+
+    async fn restart_comfyui(&self) -> Result<()> {
+        let Some((program, args)) = self.restart_command.split_first() else {
+            return Ok(());
+        };
+        println!(
+            "restarting ComfyUI to free memory: {}",
+            self.restart_command.join(" ")
+        );
+        let status = tokio::time::timeout(
+            RESTART_TIMEOUT,
+            tokio::process::Command::new(program)
+                .args(args)
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .context("ComfyUI restart timed out")?
+        .with_context(|| format!("run {program}"))?;
+        ensure!(status.success(), "ComfyUI restart failed: {status}");
+        Ok(())
+    }
+
+    async fn run_job(&self, spec: &Value, max: Duration) -> Result<(String, DynamicImage)> {
         let queued = self.post_json("queue/add", spec).await?;
         let id = queued["id"]
             .as_str()

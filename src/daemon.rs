@@ -14,15 +14,20 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
-    sync::{watch, Mutex},
+    sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore},
 };
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
 pub struct Service {
     entries: Arc<Mutex<BTreeMap<String, Entry>>>,
+    /// Admission for regression checks: a shared one takes one slot, an
+    /// exclusive one takes them all. The semaphore is FIFO, so a waiting
+    /// exclusive check holds back regressions requested after it.
+    regressions: Arc<Semaphore>,
     shutdown: watch::Receiver<bool>,
 }
+const REGRESSION_SLOTS: u32 = 1 << 16;
 struct Entry {
     config: CheckConfig,
     status: Check,
@@ -57,6 +62,7 @@ impl Service {
                     })
                     .collect(),
             )),
+            regressions: Arc::new(Semaphore::new(REGRESSION_SLOTS as usize)),
             shutdown,
         }
     }
@@ -148,12 +154,16 @@ impl Service {
             entry.status.state = State::Running as i32;
             entry.status.started_unix_ms = now();
             entry.status.finished_unix_ms = 0;
-            entry.status.detail = "running; see journalctl -u bitd".into();
+            entry.status.detail = RUNNING.into();
             started.push(entry.status.clone());
             let config = entry.config.clone();
             let service = self.clone();
             tokio::spawn(async move {
-                let (state, detail) = execute(&config, service.shutdown.clone()).await;
+                let (state, detail) = match service.admit(&config).await {
+                    // The permit is held until the plugin has finished.
+                    Some(_permit) => execute(&config, service.shutdown.clone()).await,
+                    None => (State::Failed, "daemon stopped".into()),
+                };
                 println!("check={} state={state:?} {detail}", config.name);
                 let mut entries = service.entries.lock().await;
                 let entry = entries.get_mut(&config.name).unwrap();
@@ -163,6 +173,46 @@ impl Service {
             });
         }
         Ok(started)
+    }
+    /// Wait for a regression's turn; `None` if the daemon stops first. Health
+    /// checks are lightweight by contract and are never held back.
+    async fn admit(&self, c: &CheckConfig) -> Option<Option<OwnedSemaphorePermit>> {
+        if c.kind != Kind::Regression {
+            return Some(None);
+        }
+        let slots = if c.exclusive { REGRESSION_SLOTS } else { 1 };
+        if let Ok(permit) = self.regressions.clone().try_acquire_many_owned(slots) {
+            return Some(Some(permit));
+        }
+        println!("check={} waiting for other regressions", c.name);
+        self.set_detail(
+            &c.name,
+            if c.exclusive {
+                "queued: waits for exclusive access"
+            } else {
+                "queued: waits for an exclusive check"
+            },
+        )
+        .await;
+        let mut stop = self.shutdown.clone();
+        if *stop.borrow() {
+            return None;
+        }
+        let permit = tokio::select! {
+            _ = stop.changed() => return None,
+            permit = self.regressions.clone().acquire_many_owned(slots) => permit.ok()?,
+        };
+        // The deadline and reported start begin once the check really runs.
+        let mut entries = self.entries.lock().await;
+        let entry = entries.get_mut(&c.name).unwrap();
+        entry.status.started_unix_ms = now();
+        entry.status.detail = RUNNING.into();
+        Some(Some(permit))
+    }
+    async fn set_detail(&self, name: &str, detail: &str) {
+        if let Some(entry) = self.entries.lock().await.get_mut(name) {
+            entry.status.detail = detail.into();
+        }
     }
     pub async fn drain(&self) {
         while self
@@ -175,6 +225,8 @@ impl Service {
         }
     }
 }
+
+const RUNNING: &str = "running; see journalctl -u bitd";
 
 // Each check owns a process group so its helpers cannot outlive a timeout.
 struct ProcessGroup(u32);

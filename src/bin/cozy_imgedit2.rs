@@ -28,6 +28,10 @@ struct Cozy {
     /// whose mean colour is strongly red.
     #[serde(default = "min_red_fraction")]
     min_red_fraction: f64,
+    /// Argv run after each job to restart ComfyUI and free its memory;
+    /// empty to skip.
+    #[serde(default)]
+    restart_command: Vec<String>,
 }
 fn max_seconds() -> u64 {
     900
@@ -173,7 +177,7 @@ impl BitCheck for Cozy {
                 .map_or(true, |s| !s.is_empty() && !s.contains(['-', '/'])),
             "seed must be non-empty without '-' or '/'"
         );
-        let cozy = CozyClient::new(&self.url, &self.token_file)?;
+        let cozy = CozyClient::new(&self.url, &self.token_file, &self.restart_command)?;
         self.run_job(&cozy).await
     }
 }

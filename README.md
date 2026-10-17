@@ -46,6 +46,14 @@ by aapis, not copied here. NixOS packaging supplies the locked aapis source.
 }
 ```
 
+A regression check may set `"exclusive": true` when it needs the machine's
+resources to itself (a GPU, a shared job queue). It then never runs alongside
+another regression: it waits for running ones to finish, and regressions
+requested after it wait for it, in request order. A waiting check reports
+`RUNNING` with a `queued: ...` detail, and its timeout and start time begin
+when it is admitted. Health checks are lightweight by contract and keep their
+schedule regardless.
+
 Plugin ABI v2 is executable + stdin JSON + stdout logs + exit status. All
 plugins implement `plugin::BitCheck`, including `remediation()`: invoked with
 `--remediation` and the same stdin JSON, a plugin prints plain-text
@@ -80,13 +88,24 @@ Initial plugins:
   the check fails immediately and cancels its own job through Cozy's
   `/api/queue/cancel`, which removes it if pending or interrupts it in ComfyUI
   if running. Uploaded inputs and completed outputs remain in Cozy for
-  inspection. It never clears the shared queue or restarts ComfyUI.
+  inspection. It never clears the shared queue.
 * `cozy_imggen_quantized`: requires `url` and `token_file`. Requires an idle
   Cozy queue, queues one `workflow` (default `imggen-quantized`) generate job at
   `width`×`height` (default 500×500), and passes when a result of that size (or
   floored to the model's 8-px latent grid, e.g. 500 → 496), optionally times a
   whole upscale factor (imggen-quantized upscales 4×: 1984×1984), and not blank arrives within `max_seconds` (default 60). Otherwise it
   fails and cancels its own job.
+* Both Cozy checks take an optional `restart_command` argv. Once their job has
+  ended, pass or fail, they run it (20 s limit) so ComfyUI frees the RAM its
+  loaded models hold; a failed restart fails the check. Nothing is restarted
+  when the check stops before submitting a job, e.g. on a busy queue.
+* `ardupilot`: connects to a MAVLink TCP `address` (e.g. mavlink-router's GCS
+  port) and passes when a CRC-valid HEARTBEAT from an autopilot (not a GCS),
+  optionally from `system_id`, arrives within `max_seconds` (default 3).
+* `ros2_topics`: given the `ros2` CLI and `topics` (`name`, optional `type`),
+  passes when each topic delivers a message within `max_seconds` (default 8),
+  via `ros2 topic echo --once --no-daemon` so no ros2 daemon outlives the check.
+  ROS state and logs go to a private temporary `ROS_HOME`.
 
 ## NixOS
 
@@ -94,8 +113,9 @@ Initial plugins:
 `services.bitd.checks`, and plugin definitions under `services.bitd.plugins`.
 It also installs bitctl with the shell alias `b`.
 Only selected plugin outputs enter the service configuration. Internet runs
-at 0.2 Hz on pc-base, Avahi at 0.2 Hz on personal/Jetson, and Cozy is installed
-only on personal-dell. Cozy's total daemon deadline defaults to 900 seconds;
+at 0.2 Hz on pc-base, Avahi at 0.2 Hz on personal/Jetson, Cozy (exclusive)
+on personal-dell and the Jetson, and `ardupilot` (0.2 Hz) and `ros2_topics`
+on the drone closures. Cozy's total daemon deadline defaults to 900 seconds;
 its polling budget is 870 seconds to leave time for setup and cleanup. Adjust
 both `timeoutMs` and `settings.max_seconds` for a different bound.
 

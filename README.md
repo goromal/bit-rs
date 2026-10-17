@@ -61,11 +61,16 @@ Initial plugins:
 * `avahi`: checks the system service and resolves a configured `.local`
   `hostname` through Avahi. This establishes local responder health, not
   reachability from every other LAN host.
-* `cozy_imgedit2`: requires `url` and `token_file`; `max_seconds` defaults to
-  900. Requires an idle Cozy queue, uploads a generated 256×256 red-square PNG,
-  requests a blue square using `imgedit2`, tracks its job ID, and downloads and
-  decodes a valid result. It tests workflow execution, not semantic image
-  quality. If no valid output arrives within `max_seconds` (or the job fails),
+* `cozy_imgedit2`: requires `url`, `token_file`, and `png_command` (the
+  anixpkgs `png` tool); `max_seconds` defaults to 900. Requires an idle Cozy
+  queue, generates a random `width`×`height` (default 512×512) PNG with
+  `png <seed>-<w>-<h>.random` (a fresh `seed` per run unless configured; it is
+  logged so a failure can be reproduced), and asks `imgedit2` to add bright red
+  markings. It tracks its job ID and passes when the result decodes, keeps the
+  input's aspect ratio within 2%, and has at least `min_red_fraction` (default
+  0.005) more strongly red 8×8 blocks than the input. Noise averages to grey per
+  block, so its baseline is near zero. It tests workflow execution, not
+  general image quality. If no valid output arrives within `max_seconds` (or the job fails),
   the check fails immediately and cancels its own job through Cozy's
   `/api/queue/cancel`, which removes it if pending or interrupts it in ComfyUI
   if running. Uploaded inputs and completed outputs remain in Cozy for

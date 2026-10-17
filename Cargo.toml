@@ -46,3 +46,6 @@ path = "src/bin/cozy_imgedit2.rs"
 [[bin]]
 name = "bit-check-cozy-imggen-quantized"
 path = "src/bin/cozy_imggen_quantized.rs"
+[[bin]]
+name = "bit-check-nvidia-power"
+path = "src/bin/nvidia_power.rs"

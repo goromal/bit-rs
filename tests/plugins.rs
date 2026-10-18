@@ -527,6 +527,81 @@ async fn nvidia_power_flags_capped_gpus() {
         assert!(!output.status.success());
     }
 }
+fn fake_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let path = dir.join("systemctl");
+    std::fs::write(
+        &path,
+        format!(
+            "#!{shell}\n[ \"$1 $2 $3\" = '--user show --property=LoadState,ActiveState,SubState,Result' ] || exit 3\n\
+             [ \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" ] || exit 4\n{body}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+#[tokio::test]
+async fn user_units_flags_failed_missing_and_unrun_units() {
+    let ok = "LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\n";
+    let failed = "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\n";
+    let missing = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nResult=success\n";
+    let cases = [
+        (
+            format!("printf '{ok}\\n{ok}'"),
+            true,
+            "b.service: loaded active/exited",
+        ),
+        (
+            format!("printf '{ok}\\n{failed}'"),
+            false,
+            "b.service failed (result: exit-code)",
+        ),
+        (
+            format!("printf '{missing}\\n{ok}'"),
+            false,
+            "a.service is not-found",
+        ),
+        (format!("printf '{ok}'"), false, "expected 2 unit blocks"),
+        (
+            "echo 'bus gone' >&2; exit 1".into(),
+            false,
+            "systemctl --user show failed: bus gone",
+        ),
+    ];
+    for (body, pass, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bus"), "").unwrap();
+        let systemctl = fake_systemctl(dir.path(), &body);
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-user-units"),
+            json!({"units":["a.service","b.service"],"systemctl":systemctl,"runtime_dir":dir.path()}),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{body}: {text}");
+        assert!(text.contains(message), "{body}: {text}");
+    }
+    // No user bus: the user manager is not running, so the check is skipped.
+    let dir = tempfile::tempdir().unwrap();
+    let output = plugin(
+        env!("CARGO_BIN_EXE_bit-check-user-units"),
+        json!({"units":["a.service"],"systemctl":"/nonexistent","runtime_dir":dir.path()}),
+    )
+    .await;
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("skipped"));
+    for config in [
+        json!({"units":[]}),
+        json!({"units":["-H"]}),
+        json!({"units":["a"],"bogus":1}),
+        json!({}),
+    ] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-user-units"), config).await;
+        assert!(!output.status.success());
+    }
+}
 async fn remediation(binary: &str, config: Value) -> String {
     let mut child = tokio::process::Command::new(binary)
         .arg("--remediation")
@@ -587,6 +662,11 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-ros2-topics"),
             json!({"ros2":"/bin/ros2","topics":[{"name":"/ap/time"}]}),
             "each of /ap/time",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-user-units"),
+            json!({"units":["codex-settings-update.service"]}),
+            "each of: codex-settings-update.service",
         ),
     ];
     for (binary, config, expected) in cases {

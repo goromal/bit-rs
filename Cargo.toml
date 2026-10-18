@@ -55,3 +55,6 @@ path = "src/bin/ardupilot.rs"
 [[bin]]
 name = "bit-check-ros2-topics"
 path = "src/bin/ros2_topics.rs"
+[[bin]]
+name = "bit-check-user-units"
+path = "src/bin/user_units.rs"

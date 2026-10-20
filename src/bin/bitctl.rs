@@ -38,6 +38,14 @@ enum Action {
 fn state(c: &Check) -> State {
     State::try_from(c.state).unwrap_or(State::Unspecified)
 }
+fn failing(c: &Check) -> bool {
+    matches!(state(c), State::Failed | State::TimedOut)
+}
+/// Failed and timed-out checks first; the stable sort keeps the daemon's
+/// alphabetical order within each group.
+fn failures_first(checks: &mut [Check]) {
+    checks.sort_by_key(|c| !failing(c));
+}
 fn json(c: &Check) -> serde_json::Value {
     serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms,"remediation":c.remediation})
 }
@@ -192,7 +200,18 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
     loop {
         if tick.elapsed() >= Duration::from_millis(500) || checks.is_empty() {
             match client.list(ListRequest {}).await {
-                Ok(r) => checks = r.into_inner().checks,
+                Ok(r) => {
+                    // Keep the cursor on the same check when re-sorting moves it.
+                    let name = selection
+                        .selected()
+                        .and_then(|i| checks.get(i))
+                        .map(|c: &Check| c.name.clone());
+                    checks = r.into_inner().checks;
+                    failures_first(&mut checks);
+                    if let Some(i) = name.and_then(|n| checks.iter().position(|c| c.name == n)) {
+                        selection.select(Some(i));
+                    }
+                }
                 Err(e) => message = format!("Disconnected: {e}"),
             }
             tick = tokio::time::Instant::now();
@@ -323,6 +342,25 @@ mod tests {
             finished_unix_ms: finished,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn failures_sort_first_keeping_alphabetical_order() {
+        let named = |name: &str, state: State| Check {
+            name: name.into(),
+            state: state as i32,
+            ..Default::default()
+        };
+        let mut checks = vec![
+            named("a", State::Passed),
+            named("b", State::TimedOut),
+            named("c", State::Running),
+            named("d", State::Failed),
+            named("e", State::Idle),
+        ];
+        failures_first(&mut checks);
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["b", "d", "a", "c", "e"]);
     }
 
     #[test]

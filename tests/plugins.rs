@@ -651,6 +651,69 @@ async fn systemd_units_flags_failed_and_crash_looping_units() {
         assert!(!output.status.success());
     }
 }
+/// Fake `ssh-keygen -F HOST -f FILE`: exit 0 when FILE has a line starting
+/// whose first field is HOST, 1 otherwise, and 255 for a file named `broken`.
+fn fake_ssh_keygen(dir: &std::path::Path) -> std::path::PathBuf {
+    script(
+        dir,
+        "ssh-keygen",
+        "[ \"$1 $3\" = '-F -f' ] || exit 3\n\
+         case \"$4\" in */broken) echo 'bad file' >&2; exit 255;; esac\n\
+         cut -d' ' -f1 \"$4\" | grep -qxF -- \"$2\"",
+    )
+}
+#[tokio::test]
+async fn ssh_known_hosts_needs_an_entry_per_host_in_any_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let keygen = fake_ssh_keygen(dir.path());
+    let user = dir.path().join("known_hosts");
+    let global = dir.path().join("ssh_known_hosts");
+    let absent = dir.path().join("absent");
+    std::fs::write(&user, "[localhost]:4444 ssh-ed25519 AAAA\n").unwrap();
+    std::fs::write(&global, "github.com ssh-ed25519 AAAA\n").unwrap();
+    std::fs::write(dir.path().join("broken"), "").unwrap();
+    let cases = [
+        (
+            json!([&absent, &user, &global]),
+            json!(["github.com", "[localhost]:4444"]),
+            true,
+            "github.com: known in",
+        ),
+        (
+            json!([&absent, &user]),
+            json!(["github.com", "[localhost]:4444"]),
+            false,
+            "no known_hosts entry for github.com in",
+        ),
+        (json!([&absent]), json!(["github.com"]), false, "absent"),
+        (
+            json!([dir.path().join("broken")]),
+            json!(["github.com"]),
+            false,
+            "bad file",
+        ),
+    ];
+    for (files, hosts, pass, message) in cases {
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-ssh-known-hosts"),
+            json!({"hosts":hosts,"files":files,"ssh_keygen":keygen}),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{files}: {text}");
+        assert!(text.contains(message), "{files}: {text}");
+    }
+    for config in [
+        json!({"hosts":[],"files":[&user]}),
+        json!({"hosts":["github.com"],"files":[]}),
+        json!({"hosts":["-v"],"files":[&user]}),
+        json!({"hosts":["github.com"],"files":[&user],"bogus":1}),
+        json!({"hosts":["github.com"]}),
+    ] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-ssh-known-hosts"), config).await;
+        assert!(!output.status.success());
+    }
+}
 async fn remediation(binary: &str, config: Value) -> String {
     let mut child = tokio::process::Command::new(binary)
         .arg("--remediation")
@@ -721,6 +784,11 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-systemd-units"),
             json!({"max_restarts":5,"window_seconds":120}),
             ">= 5 restarts with the latest under 120s ago",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-ssh-known-hosts"),
+            json!({"hosts":["github.com"],"files":["/home/u/.ssh/known_hosts"]}),
+            "ssh-keyscan -t ed25519,ecdsa,rsa github.com",
         ),
     ];
     for (binary, config, expected) in cases {

@@ -61,3 +61,6 @@ path = "src/bin/user_units.rs"
 [[bin]]
 name = "bit-check-systemd-units"
 path = "src/bin/systemd_units.rs"
+[[bin]]
+name = "bit-check-ssh-known-hosts"
+path = "src/bin/ssh_known_hosts.rs"

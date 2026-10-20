@@ -4,7 +4,7 @@ Rust machine built-in tests: continuous lightweight health checks and manually
 triggered regressions, monitored through a gRPC CLI and terminal UI.
 
 ```sh
-bitctl                       # live TUI: arrows, Enter, r, q
+bitctl                       # live TUI (failed checks first): arrows, Enter, r, q
 bitctl list --json           # machine-readable snapshot
 bitctl run --wait            # all configured regressions; nonzero on failure
 bitctl run internet --wait   # one explicit check
@@ -106,6 +106,10 @@ Initial plugins:
   passes when each topic delivers a message within `max_seconds` (default 8),
   via `ros2 topic echo --once --no-daemon` so no ros2 daemon outlives the check.
   ROS state and logs go to a private temporary `ROS_HOME`.
+* `ssh_known_hosts`: requires `hosts` and `files`; passes when every host has
+  an entry (via `ssh-keygen -F`, so hashed entries count) in at least one
+  existing file. Unattended git-over-SSH jobs cannot prompt to trust a missing
+  key, so a deleted `~/.ssh/known_hosts` otherwise breaks them silently.
 
 ## NixOS
 

@@ -1,3 +1,4 @@
+mod common;
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -155,7 +156,6 @@ async fn internet_success_fallback_captive_portal_and_bad_config() {
 /// Fake anixpkgs `png`: checks the `<seed>-<w>-<h>.random <out>` call and
 /// writes a 64x64 noise fixture.
 fn fake_png(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let mut state = 0x2545_f491u32;
     let noise = image::RgbImage::from_fn(64, 64, |_, _| {
         let mut px = [0u8; 3];
@@ -169,26 +169,19 @@ fn fake_png(dir: &std::path::Path) -> std::path::PathBuf {
     });
     let fixture = dir.join("noise.png");
     noise.save(&fixture).unwrap();
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("png");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1\" = seed7-64-64.random ] || exit 3\nexec cp {} \"$2\"\n",
+    script(
+        dir,
+        "png",
+        &format!(
+            "[ \"$1\" = seed7-64-64.random ] || exit 3\nexec cp {} \"$2\"",
             fixture.display()
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 /// Executable script with `body`, for fake external tools.
 fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!{shell}\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&path, body);
     path
 }
 /// Fake ComfyUI restart: appends its arguments to `<dir>/restarts`.
@@ -468,18 +461,13 @@ async fn ros2_topics_need_a_message_on_every_topic() {
     }
 }
 fn fake_nvidia_smi(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("nvidia-smi");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1\" = --query-gpu=index,enforced.power.limit,power.default_limit,name ] || exit 3\n{body}\n"
+    script(
+        dir,
+        "nvidia-smi",
+        &format!(
+            "[ \"$1\" = --query-gpu=index,enforced.power.limit,power.default_limit,name ] || exit 3\n{body}"
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 #[tokio::test]
 async fn nvidia_power_flags_capped_gpus() {
@@ -528,19 +516,14 @@ async fn nvidia_power_flags_capped_gpus() {
     }
 }
 fn fake_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("systemctl");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1 $2 $3\" = '--user show --property=LoadState,ActiveState,SubState,Result' ] || exit 3\n\
-             [ \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" ] || exit 4\n{body}\n"
+    script(
+        dir,
+        "systemctl",
+        &format!(
+            "[ \"$1 $2 $3\" = '--user show --property=LoadState,ActiveState,SubState,Result' ] || exit 3\n\
+             [ \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" ] || exit 4\n{body}"
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 #[tokio::test]
 async fn user_units_flags_failed_missing_and_unrun_units() {
@@ -603,18 +586,13 @@ async fn user_units_flags_failed_missing_and_unrun_units() {
     }
 }
 fn fake_system_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("systemctl");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$*\" = 'show --property=Id,ActiveState,SubState,Result,NRestarts,InactiveExitTimestampMonotonic -- *' ] || exit 3\n{body}\n"
+    script(
+        dir,
+        "systemctl",
+        &format!(
+            "[ \"$*\" = 'show --property=Id,ActiveState,SubState,Result,NRestarts,InactiveExitTimestampMonotonic -- *' ] || exit 3\n{body}"
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 #[tokio::test]
 async fn systemd_units_flags_failed_and_crash_looping_units() {

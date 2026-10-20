@@ -58,3 +58,6 @@ path = "src/bin/ros2_topics.rs"
 [[bin]]
 name = "bit-check-user-units"
 path = "src/bin/user_units.rs"
+[[bin]]
+name = "bit-check-systemd-units"
+path = "src/bin/systemd_units.rs"

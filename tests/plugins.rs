@@ -602,6 +602,77 @@ async fn user_units_flags_failed_missing_and_unrun_units() {
         assert!(!output.status.success());
     }
 }
+fn fake_system_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let path = dir.join("systemctl");
+    std::fs::write(
+        &path,
+        format!(
+            "#!{shell}\n[ \"$*\" = 'show --property=Id,ActiveState,SubState,Result,NRestarts,InactiveExitTimestampMonotonic -- *' ] || exit 3\n{body}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+#[tokio::test]
+async fn systemd_units_flags_failed_and_crash_looping_units() {
+    let ok = "Id=ok.service\nActiveState=active\nSubState=running\nResult=success\nNRestarts=0\nInactiveExitTimestampMonotonic=5\n";
+    let mount = "Id=-.mount\nActiveState=active\nSubState=mounted\nResult=success\nInactiveExitTimestampMonotonic=0\n";
+    let failed = "Id=bad.service\nActiveState=failed\nSubState=failed\nResult=exit-code\nNRestarts=0\nInactiveExitTimestampMonotonic=5\n";
+    let looping = "Id=loop.service\nActiveState=activating\nSubState=auto-restart\nResult=exit-code\nNRestarts=9\nInactiveExitTimestampMonotonic=5\n";
+    let cases = [
+        (
+            format!("printf '{ok}\\n{mount}'"),
+            json!({}),
+            true,
+            "2 units loaded, 0 problems",
+        ),
+        (
+            format!("printf '{ok}\\n{failed}'"),
+            json!({}),
+            false,
+            "bad.service failed (result: exit-code)",
+        ),
+        (
+            format!("printf '{looping}\\n{ok}'"),
+            json!({}),
+            false,
+            "loop.service is crash looping (waiting to restart, 9 restarts",
+        ),
+        (
+            format!("printf '{looping}\\n{failed}'"),
+            json!({"ignore":["loop.service","bad.service"]}),
+            true,
+            "0 problems",
+        ),
+        ("printf 'garbage\\n'".into(), json!({}), false, "omitted Id"),
+        ("true".into(), json!({}), false, "listed no units"),
+        (
+            "echo 'no bus' >&2; exit 1".into(),
+            json!({}),
+            false,
+            "systemctl show failed: no bus",
+        ),
+    ];
+    for (body, mut config, pass, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        config["systemctl"] = json!(fake_system_systemctl(dir.path(), &body));
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-systemd-units"), config).await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{body}: {text}");
+        assert!(text.contains(message), "{body}: {text}");
+    }
+    for config in [
+        json!({"bogus":1}),
+        json!({"max_restarts":0}),
+        json!({"ignore":"a"}),
+    ] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-systemd-units"), config).await;
+        assert!(!output.status.success());
+    }
+}
 async fn remediation(binary: &str, config: Value) -> String {
     let mut child = tokio::process::Command::new(binary)
         .arg("--remediation")
@@ -667,6 +738,11 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-user-units"),
             json!({"units":["codex-settings-update.service"]}),
             "each of: codex-settings-update.service",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-systemd-units"),
+            json!({"max_restarts":5,"window_seconds":120}),
+            ">= 5 restarts with the latest under 120s ago",
         ),
     ];
     for (binary, config, expected) in cases {

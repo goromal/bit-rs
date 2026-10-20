@@ -1,3 +1,4 @@
+mod common;
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -155,7 +156,6 @@ async fn internet_success_fallback_captive_portal_and_bad_config() {
 /// Fake anixpkgs `png`: checks the `<seed>-<w>-<h>.random <out>` call and
 /// writes a 64x64 noise fixture.
 fn fake_png(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let mut state = 0x2545_f491u32;
     let noise = image::RgbImage::from_fn(64, 64, |_, _| {
         let mut px = [0u8; 3];
@@ -169,26 +169,19 @@ fn fake_png(dir: &std::path::Path) -> std::path::PathBuf {
     });
     let fixture = dir.join("noise.png");
     noise.save(&fixture).unwrap();
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("png");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1\" = seed7-64-64.random ] || exit 3\nexec cp {} \"$2\"\n",
+    script(
+        dir,
+        "png",
+        &format!(
+            "[ \"$1\" = seed7-64-64.random ] || exit 3\nexec cp {} \"$2\"",
             fixture.display()
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 /// Executable script with `body`, for fake external tools.
 fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!{shell}\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&path, body);
     path
 }
 /// Fake ComfyUI restart: appends its arguments to `<dir>/restarts`.
@@ -468,18 +461,13 @@ async fn ros2_topics_need_a_message_on_every_topic() {
     }
 }
 fn fake_nvidia_smi(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("nvidia-smi");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1\" = --query-gpu=index,enforced.power.limit,power.default_limit,name ] || exit 3\n{body}\n"
+    script(
+        dir,
+        "nvidia-smi",
+        &format!(
+            "[ \"$1\" = --query-gpu=index,enforced.power.limit,power.default_limit,name ] || exit 3\n{body}"
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 #[tokio::test]
 async fn nvidia_power_flags_capped_gpus() {
@@ -528,19 +516,14 @@ async fn nvidia_power_flags_capped_gpus() {
     }
 }
 fn fake_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let path = dir.join("systemctl");
-    std::fs::write(
-        &path,
-        format!(
-            "#!{shell}\n[ \"$1 $2 $3\" = '--user show --property=LoadState,ActiveState,SubState,Result' ] || exit 3\n\
-             [ \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" ] || exit 4\n{body}\n"
+    script(
+        dir,
+        "systemctl",
+        &format!(
+            "[ \"$1 $2 $3\" = '--user show --property=LoadState,ActiveState,SubState,Result' ] || exit 3\n\
+             [ \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" ] || exit 4\n{body}"
         ),
     )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
 }
 #[tokio::test]
 async fn user_units_flags_failed_missing_and_unrun_units() {
@@ -599,6 +582,72 @@ async fn user_units_flags_failed_missing_and_unrun_units() {
         json!({}),
     ] {
         let output = plugin(env!("CARGO_BIN_EXE_bit-check-user-units"), config).await;
+        assert!(!output.status.success());
+    }
+}
+fn fake_system_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    script(
+        dir,
+        "systemctl",
+        &format!(
+            "[ \"$*\" = 'show --property=Id,ActiveState,SubState,Result,NRestarts,InactiveExitTimestampMonotonic -- *' ] || exit 3\n{body}"
+        ),
+    )
+}
+#[tokio::test]
+async fn systemd_units_flags_failed_and_crash_looping_units() {
+    let ok = "Id=ok.service\nActiveState=active\nSubState=running\nResult=success\nNRestarts=0\nInactiveExitTimestampMonotonic=5\n";
+    let mount = "Id=-.mount\nActiveState=active\nSubState=mounted\nResult=success\nInactiveExitTimestampMonotonic=0\n";
+    let failed = "Id=bad.service\nActiveState=failed\nSubState=failed\nResult=exit-code\nNRestarts=0\nInactiveExitTimestampMonotonic=5\n";
+    let looping = "Id=loop.service\nActiveState=activating\nSubState=auto-restart\nResult=exit-code\nNRestarts=9\nInactiveExitTimestampMonotonic=5\n";
+    let cases = [
+        (
+            format!("printf '{ok}\\n{mount}'"),
+            json!({}),
+            true,
+            "2 units loaded, 0 problems",
+        ),
+        (
+            format!("printf '{ok}\\n{failed}'"),
+            json!({}),
+            false,
+            "bad.service failed (result: exit-code)",
+        ),
+        (
+            format!("printf '{looping}\\n{ok}'"),
+            json!({}),
+            false,
+            "loop.service is crash looping (waiting to restart, 9 restarts",
+        ),
+        (
+            format!("printf '{looping}\\n{failed}'"),
+            json!({"ignore":["loop.service","bad.service"]}),
+            true,
+            "0 problems",
+        ),
+        ("printf 'garbage\\n'".into(), json!({}), false, "omitted Id"),
+        ("true".into(), json!({}), false, "listed no units"),
+        (
+            "echo 'no bus' >&2; exit 1".into(),
+            json!({}),
+            false,
+            "systemctl show failed: no bus",
+        ),
+    ];
+    for (body, mut config, pass, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        config["systemctl"] = json!(fake_system_systemctl(dir.path(), &body));
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-systemd-units"), config).await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{body}: {text}");
+        assert!(text.contains(message), "{body}: {text}");
+    }
+    for config in [
+        json!({"bogus":1}),
+        json!({"max_restarts":0}),
+        json!({"ignore":"a"}),
+    ] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-systemd-units"), config).await;
         assert!(!output.status.success());
     }
 }
@@ -667,6 +716,11 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-user-units"),
             json!({"units":["codex-settings-update.service"]}),
             "each of: codex-settings-update.service",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-systemd-units"),
+            json!({"max_restarts":5,"window_seconds":120}),
+            ">= 5 restarts with the latest under 120s ago",
         ),
     ];
     for (binary, config, expected) in cases {

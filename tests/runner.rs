@@ -1,16 +1,15 @@
+mod common;
 use bit_rs::{
     config::{CheckConfig, Config, Kind},
     daemon::Service,
     proto::State,
 };
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::time::Duration;
 use tokio::sync::watch;
 
 fn check(dir: &std::path::Path, name: &str, body: &str, timeout_ms: u64) -> CheckConfig {
     let path = dir.join(name);
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    std::fs::write(&path, format!("#!{shell}\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&path, body);
     CheckConfig {
         name: name.into(),
         command: path,

@@ -1,3 +1,4 @@
+mod common;
 use bit_rs::{
     config::{CheckConfig, Config, Kind},
     daemon::Service,
@@ -6,7 +7,6 @@ use bit_rs::{
         RunRequest,
     },
 };
-use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
 async fn grpc_and_cli_round_trip() {
@@ -15,13 +15,7 @@ async fn grpc_and_cli_round_trip() {
     let (_stop, rx) = tokio::sync::watch::channel(false);
     let dir = tempfile::tempdir().unwrap();
     let command = dir.path().join("hint");
-    let shell = std::env::var("BIT_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    std::fs::write(
-        &command,
-        format!("#!{shell}\necho 'Try turning it off and on.'\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&command, "echo 'Try turning it off and on.'");
     let service = Service::new(
         Config {
             listen: address,

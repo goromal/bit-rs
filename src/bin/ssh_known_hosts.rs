@@ -15,6 +15,10 @@ struct SshKnownHosts {
     hosts: Vec<String>,
     /// A host passes when any existing file has an entry for it.
     files: Vec<String>,
+    /// Backup known_hosts files (e.g. the copy a machine's ~/.ssh was seeded
+    /// from) that remediation suggests restoring from before ssh-keyscan.
+    #[serde(default)]
+    seeds: Vec<String>,
     #[serde(default = "ssh_keygen")]
     ssh_keygen: String,
 }
@@ -52,17 +56,28 @@ impl BitCheck for SshKnownHosts {
             .map(String::as_str)
             .unwrap_or("~/.ssh/known_hosts");
         let hosts = self.hosts.join(" ");
-        format!(
+        let mut text = String::from(
             "Unattended ssh (git sync jobs, etc.) cannot trust a host missing from \
              known_hosts and fails with \"Host key verification failed\".\n\
              - Usual cause: `rm ~/.ssh/known_hosts` to clear one changed key. Remove \
-             a single entry instead: `ssh-keygen -R '[localhost]:4444'`.\n\
-             - Restore: `ssh-keyscan -t ed25519,ecdsa,rsa {hosts} > /tmp/k; ssh-keygen -lf /tmp/k`, \
+             a single entry instead: `ssh-keygen -R '[localhost]:4444'`.\n",
+        );
+        for seed in &self.seeds {
+            text += &format!(
+                "- Restore from the seed copy: `cat {seed} >> {user_file}`, then \
+                 `ssh-keygen -R <host>` any entry that now warns of a changed key.\n"
+            );
+        }
+        text += &format!(
+            "- Otherwise: `ssh-keyscan -t ed25519,ecdsa,rsa {hosts} > /tmp/k; ssh-keygen -lf /tmp/k`, \
              compare the fingerprints with the host's published ones (GitHub: \
              docs.github.com \"GitHub's SSH key fingerprints\"), then \
              `cat /tmp/k >> {user_file}`.\n\
+             - Own machines belong in the OS-managed /etc/ssh/ssh_known_hosts, which \
+             survives deleting the user file; record a missing key there instead.\n\
              - Then re-run failed jobs (e.g. `systemctl start launchpad-sync`)."
-        )
+        );
+        text
     }
     async fn check(&self) -> Result<()> {
         ensure!(!self.hosts.is_empty(), "hosts must not be empty");

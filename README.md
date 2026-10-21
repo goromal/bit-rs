@@ -110,6 +110,8 @@ Initial plugins:
   an entry (via `ssh-keygen -F`, so hashed entries count) in at least one
   existing file. Unattended git-over-SSH jobs cannot prompt to trust a missing
   key, so a deleted `~/.ssh/known_hosts` otherwise breaks them silently.
+  Optional `seeds` names backup known_hosts files that remediation suggests
+  restoring from.
 
 ## NixOS
 

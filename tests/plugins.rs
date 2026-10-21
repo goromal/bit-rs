@@ -790,6 +790,12 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             json!({"hosts":["github.com"],"files":["/home/u/.ssh/known_hosts"]}),
             "ssh-keyscan -t ed25519,ecdsa,rsa github.com",
         ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-ssh-known-hosts"),
+            json!({"hosts":["github.com"],"files":["/home/u/.ssh/known_hosts"],
+                   "seeds":["/home/u/data/.ssh/known_hosts"]}),
+            "cat /home/u/data/.ssh/known_hosts >> /home/u/.ssh/known_hosts",
+        ),
     ];
     for (binary, config, expected) in cases {
         let text = remediation(binary, config).await;

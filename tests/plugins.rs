@@ -515,6 +515,86 @@ async fn nvidia_power_flags_capped_gpus() {
         assert!(!output.status.success());
     }
 }
+#[tokio::test]
+async fn avahi_flags_inactive_daemon_renamed_host_and_unresolvable_name() {
+    let get_fqdn =
+        "--system call org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostNameFqdn";
+    let cases = [
+        (
+            "exit 0",
+            "echo 's \"box.local\"'",
+            "exit 0",
+            true,
+            "serves and resolves box.local",
+        ),
+        (
+            "exit 0",
+            "echo 's \"BOX.local\"'",
+            "exit 0",
+            true,
+            "serves and resolves BOX.local",
+        ),
+        (
+            "exit 3",
+            "exit 0",
+            "exit 0",
+            false,
+            "avahi-daemon is not active",
+        ),
+        (
+            "exit 0",
+            "echo 's \"box-3.local\"'",
+            "exit 0",
+            false,
+            "Avahi serves this machine as box-3.local, not box.local",
+        ),
+        (
+            "exit 0",
+            "echo 'no bus' >&2; exit 1",
+            "exit 0",
+            false,
+            "host name failed: no bus",
+        ),
+        (
+            "exit 0",
+            "echo nonsense",
+            "exit 0",
+            false,
+            "unexpected GetHostNameFqdn reply",
+        ),
+        (
+            "exit 0",
+            "echo 's \"box.local\"'",
+            "exit 2",
+            false,
+            "could not resolve box.local",
+        ),
+    ];
+    for (systemctl, busctl, resolve, pass, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let config = json!({
+            "hostname": "box.local",
+            "systemctl": script(dir.path(), "systemctl",
+                &format!("[ \"$*\" = 'is-active --quiet avahi-daemon.service' ] || exit 9\n{systemctl}")),
+            "busctl": script(dir.path(), "busctl",
+                &format!("[ \"$*\" = '{get_fqdn}' ] || exit 9\n{busctl}")),
+            "avahi_resolve_host_name": script(dir.path(), "resolve",
+                &format!("[ \"$*\" = '-4 box.local' ] || exit 9\n{resolve}")),
+        });
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-avahi"), config).await;
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), pass, "{busctl}: {text}");
+        assert!(text.contains(message), "{busctl}: {text}");
+    }
+    for config in [
+        json!({"hostname":"box"}),
+        json!({"hostname":"box.local","bogus":1}),
+        json!({}),
+    ] {
+        let output = plugin(env!("CARGO_BIN_EXE_bit-check-avahi"), config).await;
+        assert!(!output.status.success());
+    }
+}
 fn fake_systemctl(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
     script(
         dir,

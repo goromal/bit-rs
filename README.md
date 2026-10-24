@@ -72,9 +72,12 @@ Initial plugins:
 
 * `internet`: tries configurable `urls` for HTTPS 204 responses (Google and
   Cloudflare by default), checking DNS/TLS/HTTP and rejecting captive portals.
-* `avahi`: checks the system service and resolves a configured `.local`
-  `hostname` through Avahi. This establishes local responder health, not
-  reachability from every other LAN host.
+* `avahi`: checks the system service, fails when Avahi serves this machine
+  under a name other than the configured `.local` `hostname` (a name conflict
+  renames it to `<name>-2.local` etc., so mDNS peers such as Nexus list it
+  twice), and resolves `hostname` through Avahi. This establishes local
+  responder health, not reachability from every other LAN host. `systemctl`,
+  `busctl`, and `avahi_resolve_host_name` override the commands used.
 * `cozy_imgedit2`: requires `url`, `token_file`, and `png_command` (the
   anixpkgs `png` tool); `max_seconds` defaults to 900. Requires an idle Cozy
   queue, generates a random `width`×`height` (default 512×512) PNG with

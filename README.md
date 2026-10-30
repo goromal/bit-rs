@@ -111,7 +111,9 @@ Initial plugins:
   (default 0.3 s) of it. Budget `max_seconds` (default 600) covers both steps;
   past it, a running analysis is cancelled. The video job slot is shared with
   the user: the check never touches a job that is running or awaiting review,
-  and deletes the export it wrote. It needs no `restart_command`: Cozy frees
+  and deletes the export it wrote; failing to delete it fails the check, so
+  bitd's unit must let it write to `<output_dir>/video` (anixpkgs:
+  `services.bitd.plugins.cozy_video.writablePaths`). It needs no `restart_command`: Cozy frees
   ComfyUI before analysis and unloads the vision model after it.
 * The two image Cozy checks take an optional `restart_command` argv. Once their job has
   ended, pass or fail, they run it (20 s limit) so ComfyUI frees the RAM its

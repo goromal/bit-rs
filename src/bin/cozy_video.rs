@@ -291,14 +291,23 @@ impl Cozy {
             Ok(())
         }
         .await;
-        if let Some(file) = output {
-            match std::fs::remove_file(&file) {
-                Ok(()) => println!("removed {}", file.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => println!("could not remove {}: {e}", file.display()),
-            }
-        }
-        result
+        // A cleanup failure fails an otherwise passing check: left alone it
+        // would add another bitd-cozy-video_N.mp4 to the output dir every run.
+        let cleanup = match output {
+            Some(file) => match std::fs::remove_file(&file) {
+                Ok(()) => {
+                    println!("removed {}", file.display());
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(anyhow::anyhow!(
+                    "could not remove the export {}: {e}",
+                    file.display()
+                )),
+            },
+            None => Ok(()),
+        };
+        result.and(cleanup)
     }
 }
 
@@ -314,12 +323,15 @@ impl BitCheck for Cozy {
              frame's verdict on the timeline. A model swap may need new expectations.\n\
              - \"awaiting review\" or \"busy\": finish or replace the job in the Video tab, \
              then rerun.\n\
-             - 401/403: the token in {token} must match Cozy's api_token_hash.",
+             - 401/403: the token in {token} must match Cozy's api_token_hash.\n\
+             - \"could not remove the export\": bitd's unit must allow writes to \
+             {out}/video (services.bitd.plugins.cozy_video.writablePaths).",
             url = self.url,
             video = self.video.display(),
             expect = self.expect_file.display(),
             max = self.max_seconds,
             token = self.token_file.display(),
+            out = self.output_dir.display(),
         )
     }
     async fn check(&self) -> Result<()> {

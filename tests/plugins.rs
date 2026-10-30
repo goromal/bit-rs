@@ -209,6 +209,7 @@ async fn cozy_video_checks_segments_export_and_cleans_up() {
         "v-timeout",
         "v-error",
         "v-short",
+        "v-readonly",
     ] {
         let (url, mock, server) = server(mode).await;
         let dir = tempfile::tempdir().unwrap();
@@ -229,6 +230,18 @@ async fn cozy_video_checks_segments_export_and_cleans_up() {
         let exported = out_dir.join("video/bitd-cozy-video.mp4");
         std::fs::create_dir_all(exported.parent().unwrap()).unwrap();
         std::fs::write(&exported, b"mp4").unwrap();
+        // As under bitd's ProtectSystem=strict without a writable path.
+        let set_mode = |m| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                exported.parent().unwrap(),
+                std::fs::Permissions::from_mode(m),
+            )
+            .unwrap()
+        };
+        if mode == "v-readonly" {
+            set_mode(0o555);
+        }
         let duration = if mode == "v-short" { "1.0" } else { "2.1" };
         let ffprobe = script(
             dir.path(),
@@ -267,17 +280,18 @@ async fn cozy_video_checks_segments_export_and_cleans_up() {
             }
             "v-error" => assert!(stderr.contains("vision model unavailable"), "{stderr}"),
             "v-short" => assert!(stderr.contains("export is 1.00 s"), "{stderr}"),
+            "v-readonly" => {
+                set_mode(0o755);
+                assert!(stderr.contains("could not remove the export"), "{stderr}");
+            }
             _ => {}
         }
-        assert_eq!(
-            has("api/video/export"),
-            ["success", "v-short"].contains(&mode),
-            "{mode}"
-        );
+        let exports = ["success", "v-short", "v-readonly"].contains(&mode);
+        assert_eq!(has("api/video/export"), exports, "{mode}");
         // The check deletes only what its own export wrote.
         assert_eq!(
             exported.exists(),
-            !["success", "v-short"].contains(&mode),
+            !exports || mode == "v-readonly",
             "{mode}"
         );
         assert!(!has("api/video/cancel") || mode == "v-timeout", "{mode}");

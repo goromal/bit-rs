@@ -98,7 +98,24 @@ Initial plugins:
   floored to the model's 8-px latent grid, e.g. 500 → 496), optionally times a
   whole upscale factor (imggen-quantized upscales 4×: 1984×1984), and not blank arrives within `max_seconds` (default 60). Otherwise it
   fails and cancels its own job.
-* Both Cozy checks take an optional `restart_command` argv. Once their job has
+* `cozy_video`: requires `url`, `token_file`, `video` (a fixture clip),
+  `expect_file` (its JSON expectations: `prompt`, `stride`, `precision`, a
+  `match` window with `tolerance`, and `negatives` windows), `ffprobe_command`,
+  and `output_dir` (Cozy's). anixpkgs points `video`/`expect_file` at the
+  anixdata pair `media/bitd/cozy-video-dolphins.{mp4,json}`. It asks Cozy's
+  Video tab to analyze the clip with `fresh` (every frame goes to the vision
+  model), handing over the store path as a host-local remote video, then
+  passes when one segment is within `tolerance` of the `match` window, none
+  overlaps a `negatives` window, and exporting just that segment yields a
+  file with video and audio whose duration is within `duration_tolerance`
+  (default 0.3 s) of it. Budget `max_seconds` (default 600) covers both steps;
+  past it, a running analysis is cancelled. The video job slot is shared with
+  the user: the check never touches a job that is running or awaiting review,
+  and deletes the export it wrote; failing to delete it fails the check, so
+  bitd's unit must let it write to `<output_dir>/video` (anixpkgs:
+  `services.bitd.plugins.cozy_video.writablePaths`). It needs no `restart_command`: Cozy frees
+  ComfyUI before analysis and unloads the vision model after it.
+* The two image Cozy checks take an optional `restart_command` argv. Once their job has
   ended, pass or fail, they run it (20 s limit) so ComfyUI frees the RAM its
   loaded models hold; a failed restart fails the check. Nothing is restarted
   when the check stops before submitting a job, e.g. on a busy queue.

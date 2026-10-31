@@ -81,6 +81,26 @@ impl CozyClient {
             .await?)
     }
 
+    /// GET `api/<path>` as JSON, failing on any HTTP error.
+    pub async fn get(&self, path: &str) -> Result<Value> {
+        self.get_json(path).await
+    }
+
+    /// POST JSON to `api/<path>`. Returns the status with the (possibly
+    /// empty) JSON body instead of failing on HTTP errors, so a caller can
+    /// tell "busy" (409) from a real failure.
+    pub async fn post(&self, path: &str, body: &Value) -> Result<(reqwest::StatusCode, Value)> {
+        let response = self
+            .client
+            .post(format!("{}/{path}", self.api))
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.json().await.unwrap_or(Value::Null);
+        Ok((status, body))
+    }
+
     pub async fn ensure_idle(&self) -> Result<()> {
         let status = self.get_json("queue/status").await?;
         ensure!(

@@ -71,6 +71,52 @@ async fn endpoint(
             json!({"id":id})
         }
         "api/queue/start" | "api/queue/cancel" => json!({"ok":true}),
+        "api/video/status" => {
+            let requests = mock.requests.lock().unwrap();
+            let analyzed = requests.iter().any(|r| r == "api/video/analyze");
+            let exported = requests.iter().any(|r| r == "api/video/export");
+            if !analyzed {
+                json!({"state": if mock.mode == "v-review" {"review"} else {"done"}})
+            } else if mock.mode == "v-timeout" {
+                json!({"state":"analyzing"})
+            } else if mock.mode == "v-error" {
+                json!({"state":"error", "error":"vision model unavailable"})
+            } else if !exported {
+                let segments = if mock.mode == "v-miss" {
+                    json!([{"start":2.5, "end":3.0}])
+                } else {
+                    json!([{"start":4.0, "end":5.0}, {"start":8.0, "end":10.0}])
+                };
+                json!({"state":"review", "calls_done":10, "avg_call_s":5.9, "segments":segments})
+            } else {
+                json!({"state":"done", "output":"video/bitd-cozy-video.mp4"})
+            }
+        }
+        "api/video/analyze" => {
+            if mock.mode == "v-busy" {
+                return (StatusCode::CONFLICT, axum::Json(json!({"error":"busy"}))).into_response();
+            }
+            let data: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(data["fresh"], true);
+            assert_eq!(data["remote_video"]["host"], "");
+            assert!(data["remote_video"]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("clip.mp4"));
+            assert_eq!(
+                (data["stride"].as_f64(), data["precision"].as_f64()),
+                (Some(2.0), Some(1.0))
+            );
+            assert_eq!(data["prompt"], "dolphins");
+            json!({"ok":true})
+        }
+        "api/video/export" => {
+            let data: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(data["keep"], json!([false, true]));
+            assert_eq!(data["basename"], "bitd-cozy-video");
+            json!({"ok":true})
+        }
+        "api/video/cancel" => json!({"ok":true}),
         "api/queue/image" => {
             if mock.mode == "invalid" {
                 return "not an image".into_response();
@@ -152,6 +198,105 @@ async fn internet_success_fallback_captive_portal_and_bad_config() {
         .status
         .success());
     server.abort();
+}
+#[tokio::test]
+async fn cozy_video_checks_segments_export_and_cleans_up() {
+    for mode in [
+        "success",
+        "v-review",
+        "v-busy",
+        "v-miss",
+        "v-timeout",
+        "v-error",
+        "v-short",
+        "v-readonly",
+    ] {
+        let (url, mock, server) = server(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "test-token\n").unwrap();
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"fixture").unwrap();
+        let expect = dir.path().join("expect.json");
+        std::fs::write(
+            &expect,
+            json!({"prompt":"dolphins","stride":2,"precision":1,
+                   "match":{"start":7.5,"end":10.0,"tolerance":1.5},
+                   "negatives":[[0.0,2.0],[10.75,13.8]]})
+            .to_string(),
+        )
+        .unwrap();
+        let out_dir = dir.path().join("out");
+        let exported = out_dir.join("video/bitd-cozy-video.mp4");
+        std::fs::create_dir_all(exported.parent().unwrap()).unwrap();
+        std::fs::write(&exported, b"mp4").unwrap();
+        // As under bitd's ProtectSystem=strict without a writable path.
+        let set_mode = |m| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                exported.parent().unwrap(),
+                std::fs::Permissions::from_mode(m),
+            )
+            .unwrap()
+        };
+        if mode == "v-readonly" {
+            set_mode(0o555);
+        }
+        let duration = if mode == "v-short" { "1.0" } else { "2.1" };
+        let ffprobe = script(
+            dir.path(),
+            "ffprobe",
+            &format!(
+                "[ \"$7\" = '{}' ] || exit 3\necho '{{\"format\":{{\"duration\":\"{duration}\"}},\
+                 \"streams\":[{{\"codec_type\":\"video\"}},{{\"codec_type\":\"audio\"}}]}}'",
+                exported.display()
+            ),
+        );
+        let output = plugin(
+            env!("CARGO_BIN_EXE_bit-check-cozy-video"),
+            json!({"url":url,"token_file":token,"video":clip,"expect_file":expect,
+                   "ffprobe_command":ffprobe,"output_dir":out_dir,"max_seconds":1}),
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            mode == "success",
+            "{mode}: {stderr}"
+        );
+        let requests = mock.requests.lock().unwrap();
+        let has = |p: &str| requests.iter().any(|r| r == p);
+        match mode {
+            // Someone's unexported work: look, touch nothing.
+            "v-review" => {
+                assert_eq!(requests.as_slice(), ["api/video/status"]);
+                assert!(stderr.contains("awaiting review"), "{stderr}");
+            }
+            "v-busy" => assert!(stderr.contains("busy"), "{stderr}"),
+            "v-miss" => assert!(stderr.contains("no segment within 1.5 s"), "{stderr}"),
+            "v-timeout" => {
+                assert!(has("api/video/cancel"), "{mode}");
+                assert!(stderr.contains("analysis did not finish"), "{stderr}");
+            }
+            "v-error" => assert!(stderr.contains("vision model unavailable"), "{stderr}"),
+            "v-short" => assert!(stderr.contains("export is 1.00 s"), "{stderr}"),
+            "v-readonly" => {
+                set_mode(0o755);
+                assert!(stderr.contains("could not remove the export"), "{stderr}");
+            }
+            _ => {}
+        }
+        let exports = ["success", "v-short", "v-readonly"].contains(&mode);
+        assert_eq!(has("api/video/export"), exports, "{mode}");
+        // The check deletes only what its own export wrote.
+        assert_eq!(
+            exported.exists(),
+            !exports || mode == "v-readonly",
+            "{mode}"
+        );
+        assert!(!has("api/video/cancel") || mode == "v-timeout", "{mode}");
+        server.abort();
+    }
 }
 /// Fake anixpkgs `png`: checks the `<seed>-<w>-<h>.random <out>` call and
 /// writes a 64x64 noise fixture.
@@ -844,6 +989,13 @@ async fn every_plugin_gives_config_aware_remediation_without_checking() {
             env!("CARGO_BIN_EXE_bit-check-cozy-imggen-quantized"),
             json!({"url":url,"token_file":"/secret/token","workflow":"wf9"}),
             "The wf9 job",
+        ),
+        (
+            env!("CARGO_BIN_EXE_bit-check-cozy-video"),
+            json!({"url":url,"token_file":"/secret/token","video":"/store/clip.mp4",
+                   "expect_file":"/store/clip.json","ffprobe_command":"/bin/ffprobe",
+                   "output_dir":"/out"}),
+            "trim /store/clip.mp4 as /store/clip.json expects",
         ),
         (
             env!("CARGO_BIN_EXE_bit-check-ardupilot"),

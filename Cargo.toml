@@ -70,3 +70,6 @@ path = "src/bin/ssh_known_hosts.rs"
 [[bin]]
 name = "bit-check-agent-sessions"
 path = "src/bin/agent_sessions.rs"
+[[bin]]
+name = "bit-check-memory"
+path = "src/bin/memory.rs"

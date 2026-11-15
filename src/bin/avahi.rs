@@ -6,9 +6,10 @@ use serde::Deserialize;
 /// Fails when avahi-daemon is down, when it serves this machine under a name
 /// other than `hostname`, or when `hostname` does not resolve through it.
 /// Avahi renames the host (`<name>-2.local`, `-3`, ...) when it sees a
-/// conflicting record while probing, e.g. its own stale announcement after an
-/// address change at boot; it never switches back by itself, so mDNS peers
-/// (Nexus included) list the machine under the new name.
+/// conflicting record while probing, most often its own stale announcement
+/// after an address change (boot, or IPv6 temporary-address rotation while
+/// running); it never switches back by itself, so mDNS peers (Nexus included)
+/// list the machine under the new name.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Avahi {
@@ -46,14 +47,16 @@ impl BitCheck for Avahi {
         format!(
             "Avahi could not serve {host}.\n\
              - `systemctl status avahi-daemon`; restart it if inactive.\n\
-             - Renamed (e.g. -2.local): Avahi saw a name conflict while probing, often \
-             its own stale record after an address change at boot. \
-             `sudo systemctl restart avahi-daemon` re-probes; if it renames again, another \
-             LAN device claims {host} (`journalctl -u avahi-daemon | grep conflict`). \
+             - Renamed (e.g. -2.local): Avahi saw a name conflict, usually its own stale \
+             record after an address change (boot or IPv6 address rotation). \
+             `sudo avahi-set-host-name {short}` re-probes the name without a restart \
+             (avahi-hostname-heal.timer does this automatically); if it renames again, \
+             another LAN device claims {host} (`journalctl -u avahi-daemon | grep conflict`). \
              Then forget the stale entry in Nexus.\n\
              - `{resolve} -4 {host}` should print this machine's IP.\n\
              - Ensure the firewall allows mDNS (UDP 5353).",
             host = self.hostname,
+            short = self.hostname.trim_end_matches(".local"),
             resolve = self.avahi_resolve_host_name,
         )
     }

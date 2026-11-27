@@ -38,6 +38,22 @@ enum Action {
 fn state(c: &Check) -> State {
     State::try_from(c.state).unwrap_or(State::Unspecified)
 }
+/// The in-flight run's progress while running, else the last result's detail.
+fn detail(c: &Check) -> &str {
+    if c.running {
+        &c.progress
+    } else {
+        &c.detail
+    }
+}
+/// The last result, marked when a new run is in flight.
+fn state_label(c: &Check) -> String {
+    match (state(c), c.running) {
+        (State::Idle | State::Unspecified, true) => "Running".into(),
+        (s, true) => format!("{s:?} (running)"),
+        (s, false) => format!("{s:?}"),
+    }
+}
 fn failing(c: &Check) -> bool {
     matches!(state(c), State::Failed | State::TimedOut)
 }
@@ -47,7 +63,7 @@ fn failures_first(checks: &mut [Check]) {
     checks.sort_by_key(|c| !failing(c));
 }
 fn json(c: &Check) -> serde_json::Value {
-    serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms,"remediation":c.remediation})
+    serde_json::json!({"name":c.name,"kind":Kind::try_from(c.kind).unwrap_or(Kind::Unspecified).as_str_name(),"state":state(c).as_str_name(),"run_id":c.run_id,"detail":c.detail,"running":c.running,"progress":c.progress,"started_unix_ms":c.started_unix_ms,"finished_unix_ms":c.finished_unix_ms,"rate_hz":c.rate_hz,"timeout_ms":c.timeout_ms,"remediation":c.remediation})
 }
 /// Duration as its two largest units, e.g. "5s", "1m 30s", "6d 5h"; a zero
 /// second unit is dropped ("5m", not "5m 0s").
@@ -80,7 +96,7 @@ fn kind(c: &Check) -> String {
 }
 /// When the check last ran, relative to `now_ms` (Unix epoch milliseconds).
 fn last_run(c: &Check, now_ms: i64) -> String {
-    if state(c) == State::Running {
+    if c.running {
         return "now".into();
     }
     match c.finished_unix_ms.max(c.started_unix_ms) {
@@ -123,7 +139,13 @@ fn now_ms() -> i64 {
 }
 fn print_checks(checks: &[Check]) {
     for c in checks {
-        println!("{:<24} {:<12} {}", c.name, state(c).as_str_name(), c.detail);
+        let running = if c.running { " (running)" } else { "" };
+        println!(
+            "{:<24} {:<12} {}",
+            c.name,
+            format!("{}{running}", state(c).as_str_name()),
+            detail(c)
+        );
     }
 }
 #[tokio::main]
@@ -167,7 +189,7 @@ async fn main() -> Result<()> {
                     }
                     results.push(current.clone());
                 }
-                if results.iter().all(|c| state(c) != State::Running) {
+                if results.iter().all(|c| !c.running) {
                     print_checks(&results);
                     if results.iter().any(|c| state(c) != State::Passed) {
                         bail!("one or more checks failed");
@@ -244,13 +266,13 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
                 let color = match state(c) {
                     State::Passed => Color::Green,
                     State::Failed | State::TimedOut => Color::Red,
-                    State::Running => Color::Yellow,
+                    _ if c.running => Color::Yellow,
                     _ => Color::DarkGray,
                 };
                 Row::new(vec![
                     Cell::from(c.name.clone()),
                     Cell::from(kind(c)),
-                    Cell::from(format!("{:?}", state(c))).style(Style::default().fg(color)),
+                    Cell::from(state_label(c)).style(Style::default().fg(color)),
                     Cell::from(last_run(c, now)),
                 ])
             });
@@ -267,9 +289,7 @@ async fn tui(mut client: BitServiceClient<Channel>) -> Result<()> {
             .row_highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol("› ");
             f.render_stateful_widget(table, areas[1], &mut selection);
-            let detail = selected
-                .map(|c| c.detail.as_str())
-                .unwrap_or("No checks configured");
+            let detail = selected.map(detail).unwrap_or("No checks configured");
             f.render_widget(
                 Paragraph::new(format!("{detail}\n{message}"))
                     .block(Block::default().borders(Borders::TOP)),
@@ -354,13 +374,39 @@ mod tests {
         let mut checks = vec![
             named("a", State::Passed),
             named("b", State::TimedOut),
-            named("c", State::Running),
+            named("c", State::Idle),
             named("d", State::Failed),
             named("e", State::Idle),
         ];
         failures_first(&mut checks);
         let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["b", "d", "a", "c", "e"]);
+    }
+
+    #[test]
+    fn running_keeps_last_result_visible() {
+        let running = |state: State| Check {
+            state: state as i32,
+            running: true,
+            detail: "passed".into(),
+            progress: "queued: waits for exclusive access".into(),
+            ..Default::default()
+        };
+        assert_eq!(state_label(&running(State::Idle)), "Running");
+        assert_eq!(state_label(&running(State::Passed)), "Passed (running)");
+        assert_eq!(
+            detail(&running(State::Passed)),
+            "queued: waits for exclusive access"
+        );
+        let done = Check {
+            running: false,
+            ..running(State::Failed)
+        };
+        assert_eq!(
+            (state_label(&done).as_str(), detail(&done)),
+            ("Failed", "passed")
+        );
+        assert!(!failing(&running(State::Passed)));
     }
 
     #[test]
@@ -391,7 +437,11 @@ mod tests {
     fn last_run_is_relative_and_compact() {
         let now = 1_000_000_000_000;
         assert_eq!(last_run(&check(State::Idle, 0, 0), now), "never");
-        assert_eq!(last_run(&check(State::Running, now - 9_000, 0), now), "now");
+        let running = Check {
+            running: true,
+            ..check(State::Passed, now - 9_000, now - 20_000)
+        };
+        assert_eq!(last_run(&running, now), "now");
         assert_eq!(
             last_run(&check(State::Passed, now - 6_000, now - 5_400), now),
             "5s ago"

@@ -55,7 +55,9 @@ async fn parallel_outcomes_and_atomic_rejection() {
         .all(|c| c.state == State::Idle as i32));
     let started = service.launch(vec![]).await.unwrap();
     assert_eq!(started.len(), 3);
-    assert!(started.iter().all(|c| c.state == State::Running as i32));
+    assert!(started
+        .iter()
+        .all(|c| c.running && c.state == State::Idle as i32));
     assert!(service.launch(vec!["pass".into()]).await.is_err());
     let finished = settled(&service).await;
     assert_eq!(
@@ -71,7 +73,46 @@ async fn parallel_outcomes_and_atomic_rejection() {
     );
     assert!(finished
         .iter()
-        .all(|c| c.finished_unix_ms >= c.started_unix_ms && c.run_id == 1));
+        .all(|c| c.finished_unix_ms >= c.started_unix_ms
+            && c.run_id == 1
+            && !c.running
+            && c.progress.is_empty()));
+}
+#[tokio::test]
+async fn rerun_keeps_last_result_until_it_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Passes on the first run, fails on the second (slowly).
+    let marker = dir.path().join("ran");
+    let body = format!(
+        "if [ -e '{0}' ]; then sleep 0.3; exit 1; fi; touch '{0}'",
+        marker.display()
+    );
+    let (_stop, rx) = watch::channel(false);
+    let service = Service::new(
+        Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            checks: vec![check(dir.path(), "flip", &body, 2000)],
+        },
+        rx,
+    );
+    service.launch(vec![]).await.unwrap();
+    let first = settled(&service).await.pop().unwrap();
+    assert_eq!(first.state, State::Passed as i32);
+    service.launch(vec![]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mid = service.snapshot().await.pop().unwrap();
+    assert!(mid.running);
+    assert_eq!(mid.run_id, 2);
+    assert_eq!(mid.progress, "running; see journalctl -u bitd");
+    // Sampled mid-run, the check still reports the last finished result.
+    assert_eq!(
+        (mid.state, mid.detail.as_str(), mid.finished_unix_ms),
+        (State::Passed as i32, "passed", first.finished_unix_ms)
+    );
+    let second = settled(&service).await.pop().unwrap();
+    assert_eq!(second.state, State::Failed as i32);
+    assert!(!second.running && second.progress.is_empty());
+    assert!(second.finished_unix_ms >= second.started_unix_ms);
 }
 #[tokio::test]
 async fn exclusive_regressions_run_alone_and_health_keeps_going() {
@@ -153,11 +194,12 @@ async fn shutdown_fails_queued_regressions() {
     service.launch(vec!["b".into()]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let queued = service.snapshot().await;
-    assert_eq!(queued[1].state, State::Running as i32);
+    assert!(queued[1].running);
+    assert_eq!(queued[1].state, State::Idle as i32);
     assert!(
-        queued[1].detail.starts_with("queued"),
+        queued[1].progress.starts_with("queued"),
         "{}",
-        queued[1].detail
+        queued[1].progress
     );
     stop.send(true).unwrap();
     let finished = settled(&service).await;

@@ -141,7 +141,7 @@ impl Service {
             let e = entries
                 .get(name)
                 .ok_or_else(|| Status::not_found(format!("unknown check: {name}")))?;
-            if e.status.state == State::Running as i32 {
+            if e.status.running {
                 return Err(Status::failed_precondition(format!(
                     "already running: {name}"
                 )));
@@ -150,11 +150,13 @@ impl Service {
         let mut started = Vec::new();
         for name in names {
             let entry = entries.get_mut(&name).unwrap();
+            // The last result stays visible until this run finishes, so a
+            // check is never reported as not-passing just for being sampled
+            // mid-run.
             entry.status.run_id += 1;
-            entry.status.state = State::Running as i32;
+            entry.status.running = true;
             entry.status.started_unix_ms = now();
-            entry.status.finished_unix_ms = 0;
-            entry.status.detail = RUNNING.into();
+            entry.status.progress = RUNNING.into();
             started.push(entry.status.clone());
             let config = entry.config.clone();
             let service = self.clone();
@@ -170,6 +172,8 @@ impl Service {
                 entry.status.state = state as i32;
                 entry.status.detail = detail;
                 entry.status.finished_unix_ms = now();
+                entry.status.running = false;
+                entry.status.progress.clear();
             });
         }
         Ok(started)
@@ -185,7 +189,7 @@ impl Service {
             return Some(Some(permit));
         }
         println!("check={} waiting for other regressions", c.name);
-        self.set_detail(
+        self.set_progress(
             &c.name,
             if c.exclusive {
                 "queued: waits for exclusive access"
@@ -206,21 +210,16 @@ impl Service {
         let mut entries = self.entries.lock().await;
         let entry = entries.get_mut(&c.name).unwrap();
         entry.status.started_unix_ms = now();
-        entry.status.detail = RUNNING.into();
+        entry.status.progress = RUNNING.into();
         Some(Some(permit))
     }
-    async fn set_detail(&self, name: &str, detail: &str) {
+    async fn set_progress(&self, name: &str, progress: &str) {
         if let Some(entry) = self.entries.lock().await.get_mut(name) {
-            entry.status.detail = detail.into();
+            entry.status.progress = progress.into();
         }
     }
     pub async fn drain(&self) {
-        while self
-            .snapshot()
-            .await
-            .iter()
-            .any(|c| c.state == State::Running as i32)
-        {
+        while self.snapshot().await.iter().any(|c| c.running) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
